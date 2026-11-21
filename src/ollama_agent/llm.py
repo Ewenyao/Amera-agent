@@ -38,6 +38,26 @@ class OllamaClient:
         except Exception:
             return []
 
+    def capabilities(self, model: str = None):
+        """返回模型能力列表，例如 ['completion', 'tools', 'thinking']。查不到返回 []。"""
+        name = model or self.model
+        try:
+            req = urllib.request.Request(
+                f"{self.host}/api/show",
+                data=json.dumps({"model": name}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return list(data.get("capabilities") or [])
+        except Exception:
+            return []
+
+    def supports(self, feature: str, model: str = None) -> bool:
+        caps = self.capabilities(model)
+        return feature in caps if caps else True  # 查不到就别拦着
+
     def _payload(self, messages, tools):
         payload = {
             "model": self.model,

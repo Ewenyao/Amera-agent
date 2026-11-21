@@ -34,6 +34,8 @@
 | 安全 | 命令黑名单 | 拦截 `rm -rf`、`format`、`shutdown`、`bcdedit` 等 |
 | 安全 | 防死循环 | 重复调用拦截、联网工具连续上限、轮数用尽强制收尾 |
 | 配置 | 多级配置 | 命令行 > 环境变量 > 配置文件 > 内置默认 |
+| 模型 | 任意模型 | 只要 Ollama 声明了 `tools` 能力，千问之外的 llama / mistral / granite 都能用 |
+| 模型 | 能力自检 | 启动时检查 tools / thinking，缺能力直接提示 |
 | 配置 | 模型切换 | `/model` 运行时切换，或 `-m` 指定 |
 | 跨平台 | Windows / macOS / Linux | 路径、编码、换行符都做了处理 |
 
@@ -41,7 +43,43 @@
 
 ---
 
-## 二、环境要求
+## 二、支持哪些模型
+
+代码不绑定任何模型家族。判断标准只有一条：**这个模型在 Ollama 里声明了 `tools` 能力**。
+
+查看本地模型的能力：
+
+```bash
+agent --list-models
+# qwen3.5:4b       tools     vision,thinking
+# llama3.2:1b      tools
+# mistral:7b       no tools
+```
+
+| 模型 | 工具调用 | 备注 |
+|---|---|---|
+| qwen3 / qwen3.5 | 支持 | 默认选它，中文指令最稳 |
+| llama3.1 / 3.2 / 3.3 | 支持 | 英文项目更顺，1b 版偏弱 |
+| mistral-nemo / mistral-small 3.x | 支持 | 需要 tools 模板的版本 |
+| granite3.x | 支持 | IBM 系列，工具格式规整 |
+| deepseek-r1 蒸馏版 | 多数不支持 | 会退化成纯聊天 |
+| mistral:7b（老版） | 不支持 | 同上 |
+| 任何 base 模型 | 不支持 | 没经过指令微调 |
+
+启动时会自动检查，缺能力会明确提示，不会静默失败：
+
+```
+注意：mistral:7b 没有 tools 能力，只能聊天，调不了工具。（completion）
+注意：llama3.2:1b 不支持 thinking，已自动关闭思维链。
+```
+
+思维链（`--think`）只对声明了 `thinking` 的模型有效，其他模型会自动关掉，不会报错。
+
+**换模型的影响**：小模型（1b～3b）能调工具但经常漏参数、乱填路径；4b 是可用下限；8b 以上明显稳。换模型前先在项目里试一条真实任务。
+
+上表依据各模型在 Ollama 里声明的能力，实际以 `agent --list-models` 的输出为准——同一模型的不同量化版本、不同 Ollama 版本都可能不一样。
+
+## 三、环境要求
 
 | 项 | 要求 |
 |---|---|
@@ -67,7 +105,7 @@ ollama pull qwen3.5:4b
 
 ---
 
-## 三、部署
+## 四、部署
 
 ### 方式 A：pip 安装（推荐）
 
@@ -132,7 +170,7 @@ pip install -e .
 
 ---
 
-## 四、快速上手
+## 五、快速上手
 
 ```bash
 cd 你的项目目录
@@ -170,7 +208,7 @@ agent
 
 ---
 
-## 五、命令参考
+## 六、命令参考
 
 ### 命令行参数
 
@@ -205,7 +243,7 @@ agent
 
 ---
 
-## 六、工具能力与限制
+## 七、工具能力与限制
 
 | 工具 | 输入 | 限制 | 典型用途 |
 |---|---|---|---|
@@ -223,7 +261,7 @@ agent
 
 ---
 
-## 七、配置
+## 八、配置
 
 优先级：**命令行参数 > 环境变量 > 配置文件 > 内置默认**。
 
@@ -278,7 +316,7 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 
 ---
 
-## 八、权限模型
+## 九、权限模型
 
 | 能力 | 默认范围 | 怎么收紧 | 怎么放宽 |
 |---|---|---|---|
@@ -294,7 +332,7 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 
 ---
 
-## 九、常见问题
+## 十、常见问题
 
 **连不上 Ollama**
 
@@ -354,7 +392,7 @@ python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 
 ---
 
-## 十、卸载
+## 十一、卸载
 
 ```bash
 pip uninstall ollama-agent
@@ -366,7 +404,7 @@ pip uninstall ollama-agent
 
 ---
 
-## 十一、开发
+## 十二、开发
 
 ```bash
 git clone https://github.com/OWNER/ollama-agent.git

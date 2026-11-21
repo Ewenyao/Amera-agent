@@ -64,6 +64,22 @@ def build_system_prompt(cfg, toolbox):
     return prompt
 
 
+def check_capabilities(client, cfg, paint, quiet=False):
+    """非千问模型也能用，前提是它声明了 tools 能力。查不到就别拦着。"""
+    caps = client.capabilities()
+    if not caps:
+        return
+    if "tools" not in caps:
+        if not quiet:
+            print(paint(f"  注意：{cfg['model']} 没有 tools 能力，只能聊天，调不了工具。"
+                        f"（{', '.join(caps)}）", YELLOW))
+    if cfg["think"] and "thinking" not in caps:
+        cfg["think"] = False
+        client.think = False
+        if not quiet:
+            print(paint(f"  注意：{cfg['model']} 不支持 thinking，已自动关闭思维链。", DIM))
+
+
 def make_stack(cfg, paint):
     client = OllamaClient(host=cfg["host"], model=cfg["model"], num_ctx=cfg["num_ctx"],
                           think=cfg["think"])
@@ -191,6 +207,7 @@ def repl(cfg, client, toolbox, agent, paint):
                 cfg["model"] = arg.strip()
                 client.model = cfg["model"]
                 messages.clear()
+                check_capabilities(client, cfg, paint)
                 print(paint(f"  已切到 {cfg['model']}，上下文已清空。\n", CYAN))
                 continue
             if cmd == "/init":
@@ -255,6 +272,7 @@ def main(argv=None):
     os.chdir(cfg["root"])
 
     client, toolbox, agent = make_stack(cfg, paint)
+    check_capabilities(client, cfg, paint)
 
     if args.list_models:
         names = client.tags()
@@ -262,7 +280,10 @@ def main(argv=None):
             print(paint("连不上 Ollama，或者没有模型。先跑 `ollama serve`。", YELLOW))
             return 1
         for n in names:
-            print(n)
+            caps = client.capabilities(n)
+            mark = "tools" if "tools" in caps else paint("no tools", YELLOW)
+            extra = ",".join(c for c in caps if c not in ("completion", "tools"))
+            print(f"{n:<24} {mark:<9} {extra}")
         return 0
 
     if args.init:
