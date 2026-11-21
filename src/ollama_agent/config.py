@@ -66,6 +66,10 @@ def resolve(args) -> dict:
     else:
         write_roots = default_write_roots()
 
+    allow_shell = not args.no_shell
+    if cfg.get("allow_shell") is False:
+        allow_shell = False
+
     return {
         "model": model,
         "host": host,
@@ -74,6 +78,6 @@ def resolve(args) -> dict:
         "think": think,
         "read_all": read_all,
         "write_roots": write_roots,
-        "allow_shell": not args.no_shell,
+        "allow_shell": allow_shell,
         "root": str(Path(args.root or os.getcwd()).expanduser().resolve()),
     }
