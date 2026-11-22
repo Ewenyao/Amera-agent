@@ -26,6 +26,9 @@
 | 工具 | `shell` | 执行命令，默认 180 秒超时，破坏性操作黑名单 |
 | 工具 | `web_search` | Bing 搜索，返回标题 / 链接 / 摘要 |
 | 工具 | `fetch_url` | 抓网页，HTML 转纯文本，2MB 上限 |
+| 技能 | 技能文件 | `.agent/skills/*.md` 与全局 `skills/*.md`，markdown 片段拼进系统提示 |
+| 技能 | 开关管理 | `/skills` 列出，`on` / `off` 切换，状态存配置文件 |
+| 技能 | 总长保护 | 启用技能正文合计超过 800 字会跳过超出的，不挤爆上下文 |
 | 上下文 | 项目说明 | `/init` 生成 `AGENTS.md`，每次启动自动加载 |
 | 上下文 | 窗口控制 | 超长对话自动裁剪历史，避免撑爆 `num_ctx` |
 | 上下文 | Token 统计 | 每轮结束显示输入 / 输出 token 和耗时 |
@@ -238,6 +241,11 @@ agent
 | `/model` | 显示当前模型和本地可用模型 |
 | `/model qwen3:8b` | 切换模型（会清空当前对话） |
 | `/clear` | 清空对话上下文，工具和模型不变 |
+| `/skills` | 列出技能及启用状态 |
+| `/skills on <名字>` | 启用某个技能 |
+| `/skills off <名字>` | 关闭；`/skills off all` 全关 |
+| `/skills init` | 在项目里生成一个示例技能 |
+| `/skills reload` | 重新扫描技能目录（改完文件用） |
 | `/tools` | 列出当前可用工具 |
 | `/help` | 帮助 |
 | `/exit` | 退出（`Ctrl+C` / `Ctrl+D` 同样） |
@@ -318,7 +326,56 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 
 ---
 
-## 九、权限模型
+## 九、技能（Skills）
+
+技能就是一段会被拼进系统提示的 markdown。适合放"这个项目必须遵守的习惯"：提交信息格式、错误处理约定、日志规范。
+
+### 放哪里
+
+| 范围 | 路径 | 说明 |
+|---|---|---|
+| 项目 | `<工作目录>/.agent/skills/<名字>.md` | 跟项目走，可提交进 git |
+| 全局 | `~/.config/ollama-agent/skills/`（Windows：`%APPDATA%\ollama-agent\skills\`） | 跨项目共用 |
+
+同名时项目级覆盖全局。
+
+### 文件格式
+
+```markdown
+---
+name: commit
+description: 生成 Conventional Commits 格式的提交信息
+---
+写提交信息时用 `type(scope): summary`，type 只能是 feat/fix/docs/refactor/test/chore。
+正文说明为什么改，不要复述改了什么。
+```
+
+front matter 可以省略，省略时文件名就是技能名。
+
+### 用法
+
+```
+> /skills
+  技能 2 个，启用 1 个
+  [on ] commit             74字  project 生成 Conventional Commits 格式的提交信息
+  [off] no-preamble        22字  project 不要任何开场白
+
+> /skills on no-preamble
+  no-preamble 已启用。
+
+> /skills off all
+  已关闭全部技能。
+```
+
+启用状态写进配置文件（`skills` 字段），下次启动自动恢复。启动横幅会显示 `技能 1/2 启用`。
+
+### 注意事项
+
+- **技能是提示词，不是硬约束。** 4B 关掉思维链时经常无视，实测同一个"回答必须以【X】开头"的技能，`--think` 开着才照做。技能写得越具体、越靠近任务，命中率越高。
+- **总长有上限。** 所有启用技能的正文合计超过 800 字，超出的会被跳过，横幅下面会提示哪个没注入。4096 的窗口塞不下太多。
+- **不要放密钥。** 技能内容会原样进入系统提示。
+
+## 十、权限模型
 
 | 能力 | 默认范围 | 怎么收紧 | 怎么放宽 |
 |---|---|---|---|
@@ -334,7 +391,7 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 
 ---
 
-## 十、常见问题
+## 十一、常见问题
 
 **连不上 Ollama**
 
@@ -404,7 +461,7 @@ python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 
 ---
 
-## 十一、卸载
+## 十二、卸载
 
 ```bash
 pip uninstall ollama-agent
@@ -416,7 +473,7 @@ pip uninstall ollama-agent
 
 ---
 
-## 十二、开发
+## 十三、开发
 
 ```bash
 git clone https://github.com/OWNER/ollama-agent.git
@@ -432,6 +489,7 @@ src/ollama_agent/
 ├── llm.py            Ollama /api/chat 客户端（流式 + tools）
 ├── loop.py           主循环 + 三道防死循环闸
 ├── project_scan.py   目录扫描 + AGENTS.md
+├── skills.py         技能加载、渲染、示例生成
 └── tools.py          工具 schema + ToolBox
 ```
 

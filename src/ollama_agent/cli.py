@@ -9,10 +9,12 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import resolve
+from .config import resolve, save_skills
 from .llm import OllamaClient, OllamaError
 from .loop import Agent
 from .project_scan import AGENTS_FILE, INIT_PROMPT, load_context, save_context, scan_project
+from .skills import (ensure_example, global_skills_dir, load_skills,
+                    project_skills_dir, render_enabled)
 from .tools import TOOL_SCHEMAS, ToolBox
 
 BOLD, DIM, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[33m", "\033[0m"
@@ -37,7 +39,7 @@ class Painter:
         return f"{style}{text}{RESET}" if self.on and style else text
 
 
-def build_system_prompt(cfg, toolbox):
+def build_system_prompt(cfg, toolbox, skills=None):
     root = cfg["root"]
     writable = ", ".join([root, *cfg["write_roots"]])
     read_line = ("- 读：没有目录限制，整个磁盘都能读。" if cfg["read_all"]
@@ -61,6 +63,10 @@ def build_system_prompt(cfg, toolbox):
     ctx = load_context(root)
     if ctx:
         prompt += f"\n## 项目上下文（{AGENTS_FILE}）\n{ctx}\n"
+
+    block, _skipped = render_enabled(skills or [])
+    if block:
+        prompt += "\n" + block
     return prompt
 
 
@@ -86,8 +92,10 @@ def make_stack(cfg, paint):
     toolbox = ToolBox(cfg["root"], allow_shell=cfg["allow_shell"],
                       write_roots=cfg["write_roots"], read_all=cfg["read_all"],
                       shell_timeout=cfg["shell_timeout"])
-    agent = Agent(client, toolbox, build_system_prompt(cfg, toolbox), max_steps=cfg["max_steps"])
-    return client, toolbox, agent
+    skills = load_skills(cfg["root"], cfg["skills"])
+    agent = Agent(client, toolbox, build_system_prompt(cfg, toolbox, skills),
+                  max_steps=cfg["max_steps"])
+    return client, toolbox, agent, skills
 
 
 class Printer:
@@ -148,12 +156,87 @@ HELP = """命令:
   /init          扫描当前目录生成 AGENTS.md
   /clear         清空对话上下文
   /model [名字]  查看或切换模型
+  /skills        技能列表与开关（on/off/init/reload）
   /tools         列出可用工具
   /exit          退出
 其它输入都当任务发给模型。"""
 
 
-def repl(cfg, client, toolbox, agent, paint):
+def _persist_skills(cfg, agent, toolbox, skills, paint):
+    save_skills([s.name for s in skills if s.enabled])
+    agent.system_prompt = build_system_prompt(cfg, toolbox, skills)
+    block, skipped = render_enabled(skills)
+    if skipped:
+        print(paint(f"  注意：技能总长超过 {len(block)} 字上限，{', '.join(skipped)} 没被注入。", YELLOW))
+
+
+def handle_skills(arg, cfg, agent, toolbox, skills, paint):
+    action, _, target = arg.strip().partition(" ")
+    action = action.lower()
+    target = target.strip()
+
+    if action in ("", "list"):
+        if not skills:
+            print(paint(f"  没有技能。项目目录：{project_skills_dir(cfg['root'])}", DIM))
+            print(paint("  用 /skills init 生成一个示例，或把 .md 文件放进上面两个目录。", DIM))
+            print(paint(f"  全局目录：{global_skills_dir()}\n", DIM))
+            return skills
+
+        on = sum(1 for s in skills if s.enabled)
+        print(f"  技能 {len(skills)} 个，启用 {on} 个")
+        for s in skills:
+            mark = paint("on ", CYAN) if s.enabled else paint("off", DIM)
+            print(f"  [{mark}] {s.name:<16} {s.size:>4}字  {s.scope:<7} {s.description[:44]}")
+        print(paint(f"  项目: {project_skills_dir(cfg['root'])}", DIM))
+        print(paint(f"  全局: {global_skills_dir()}", DIM))
+        print(paint("  /skills on <名字> · /skills off <名字> · /skills init · /skills reload\n", DIM))
+        return skills
+
+    if action == "init":
+        path = ensure_example(cfg["root"])
+        if path:
+            print(paint(f"  已创建示例技能 {path}", CYAN))
+        else:
+            print(paint("  项目里已经有技能了，没重复创建。", DIM))
+        skills = load_skills(cfg["root"], cfg["skills"])
+        _persist_skills(cfg, agent, toolbox, skills, paint)
+        return skills
+
+    if action == "reload":
+        skills = load_skills(cfg["root"], cfg["skills"])
+        _persist_skills(cfg, agent, toolbox, skills, paint)
+        print(paint(f"  已重新扫描，共 {len(skills)} 个。\n", DIM))
+        return skills
+
+    if action in ("on", "off"):
+        if not target:
+            print(paint(f"  用法：/skills {action} <名字>\n", YELLOW))
+            return skills
+        if action == "off" and target == "all":
+            for s in skills:
+                s.enabled = False
+            _persist_skills(cfg, agent, toolbox, skills, paint)
+            print(paint("  已关闭全部技能。\n", DIM))
+            return skills
+
+        match = next((s for s in skills if s.name == target), None)
+        if match is None:
+            lowered = target.lower()
+            match = next((s for s in skills if s.name.lower() == lowered), None)
+        if match is None:
+            print(paint(f"  没有叫 {target} 的技能。/skills 看列表。\n", YELLOW))
+            return skills
+
+        match.enabled = (action == "on")
+        _persist_skills(cfg, agent, toolbox, skills, paint)
+        print(paint(f"  {match.name} 已{'启用' if match.enabled else '关闭'}。\n", CYAN))
+        return skills
+
+    print(paint("  用法：/skills [list|on 名字|off 名字|off all|init|reload]\n", YELLOW))
+    return skills
+
+
+def repl(cfg, client, toolbox, agent, paint, skills):
     printer = Printer(paint)
     messages = []
     thin = paint("─" * 64, DIM)
@@ -165,6 +248,9 @@ def repl(cfg, client, toolbox, agent, paint):
     print(f"  cwd    {cfg['root']}")
     print(f"  服务   {cfg['host']}")
     print(f"  上下文 {ctx}")
+    if skills:
+        on = sum(1 for s in skills if s.enabled)
+        print(f"  技能   {on}/{len(skills)} 启用")
     print(thin)
     print(paint("  直接说要做的事。/help 看命令，/exit 退出。\n", DIM))
 
@@ -176,6 +262,8 @@ def repl(cfg, client, toolbox, agent, paint):
             return
         if not raw:
             continue
+        if raw.lower() in ("exit", "quit", ":q"):
+            return
 
         if raw.startswith("/"):
             cmd, _, arg = raw.partition(" ")
@@ -188,6 +276,9 @@ def repl(cfg, client, toolbox, agent, paint):
             if cmd == "/clear":
                 messages.clear()
                 print(paint("  上下文已清空。\n", DIM))
+                continue
+            if cmd == "/skills":
+                skills = handle_skills(arg, cfg, agent, toolbox, skills, paint)
                 continue
             if cmd == "/tools":
                 for t in TOOL_SCHEMAS:
@@ -274,7 +365,7 @@ def main(argv=None):
         return 2
     os.chdir(cfg["root"])
 
-    client, toolbox, agent = make_stack(cfg, paint)
+    client, toolbox, agent, skills = make_stack(cfg, paint)
     check_capabilities(client, cfg, paint)
 
     if args.list_models:
@@ -307,7 +398,7 @@ def main(argv=None):
         printer.end()
         return 0
 
-    repl(cfg, client, toolbox, agent, paint)
+    repl(cfg, client, toolbox, agent, paint, skills)
     return 0
 
 

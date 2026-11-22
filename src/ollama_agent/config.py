@@ -17,6 +17,20 @@ def config_path() -> Path:
     return Path(base) / APP_NAME / "config.json"
 
 
+def save_file(data: dict) -> Path:
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return p
+
+
+def save_skills(names) -> Path:
+    """只更新 skills 字段，保留配置文件里的其它内容。"""
+    data = load_file()
+    data["skills"] = list(dict.fromkeys(names))
+    return save_file(data)
+
+
 def load_file() -> dict:
     p = config_path()
     if not p.exists():
@@ -82,5 +96,6 @@ def resolve(args) -> dict:
         "read_all": read_all,
         "write_roots": write_roots,
         "allow_shell": allow_shell,
+        "skills": list(cfg.get("skills") or []),
         "root": str(Path(args.root or os.getcwd()).expanduser().resolve()),
     }
