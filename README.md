@@ -126,6 +126,15 @@ agent --version      # ollama-agent 0.1.0
 agent --list-models  # 列出本地模型
 ```
 
+**命令撞车排查**：`agent` 是很常见的名字，容易被别的工具抢占。
+
+```bash
+where agent        # Windows
+which -a agent     # macOS / Linux
+```
+
+第一条就是实际执行的。如果指向别的目录，删掉冲突项，或把本仓库目录移到 PATH 前面。改完 PATH 要**重开终端**才生效。
+
 ### 方式 B：不安装，源码直跑
 
 Windows：
