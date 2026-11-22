@@ -141,8 +141,15 @@ Windows：
 
 ```bat
 cd D:\ollama\ollama-agent
+setup.cmd     :: 第一次先跑这个，创建 .venv 并安装
 agent.cmd
 ```
+
+`agent.cmd` 会按顺序找可用的 Python：仓库里的 `.venv\Scripts\python.exe` → `py -3` → `python` → `python3`。都找不到才报错退出，不会静默失败。
+
+所以**系统 PATH 里没有 Python 也能用**，前提是先跑过一次 `setup.cmd`。
+
+> 注意：`.cmd` 里不能写中文。cmd 按 ANSI 读脚本，UTF-8 中文会把 `echo`、`if (...)` 冲成乱码，报“不是内部或外部命令”。脚本里的提示一律用 ASCII。
 
 macOS / Linux：
 
