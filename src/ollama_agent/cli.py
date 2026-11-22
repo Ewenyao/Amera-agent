@@ -84,7 +84,8 @@ def make_stack(cfg, paint):
     client = OllamaClient(host=cfg["host"], model=cfg["model"], num_ctx=cfg["num_ctx"],
                           think=cfg["think"])
     toolbox = ToolBox(cfg["root"], allow_shell=cfg["allow_shell"],
-                      write_roots=cfg["write_roots"], read_all=cfg["read_all"])
+                      write_roots=cfg["write_roots"], read_all=cfg["read_all"],
+                      shell_timeout=cfg["shell_timeout"])
     agent = Agent(client, toolbox, build_system_prompt(cfg, toolbox), max_steps=cfg["max_steps"])
     return client, toolbox, agent
 
@@ -252,6 +253,8 @@ def main(argv=None):
     ap.add_argument("--host", help="Ollama base url (default: http://127.0.0.1:11434)")
     ap.add_argument("--num-ctx", type=int, help="context window (default 4096)")
     ap.add_argument("--max-steps", type=int, help="max tool rounds (default 12)")
+    ap.add_argument("--shell-timeout", type=int,
+                    help="seconds before a shell command is killed (default 180)")
     ap.add_argument("--think", action="store_true", help="enable thinking (slower)")
     ap.add_argument("--no-shell", action="store_true", help="disable the shell tool")
     ap.add_argument("--jail", action="store_true", help="restrict reads to the workspace")

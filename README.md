@@ -23,7 +23,7 @@
 | 工具 | `read_file` | 按行分段读，单次最多 2000 行 |
 | 工具 | `write_file` | 写文件，自动建父目录 |
 | 工具 | `replace_in_file` | 精确替换，要求原文唯一匹配 |
-| 工具 | `shell` | 执行命令，60 秒超时，破坏性操作黑名单 |
+| 工具 | `shell` | 执行命令，默认 180 秒超时，破坏性操作黑名单 |
 | 工具 | `web_search` | Bing 搜索，返回标题 / 链接 / 摘要 |
 | 工具 | `fetch_url` | 抓网页，HTML 转纯文本，2MB 上限 |
 | 上下文 | 项目说明 | `/init` 生成 `AGENTS.md`，每次启动自动加载 |
@@ -220,6 +220,7 @@ agent
 | `--host` | Ollama 地址 | `agent --host http://192.168.1.10:11434` |
 | `--num-ctx` | 上下文窗口 | `agent --num-ctx 8192` |
 | `--max-steps` | 最大工具轮数 | `agent --max-steps 6` |
+| `--shell-timeout` | 命令超时秒数 | `agent --shell-timeout 600` |
 | `--think` | 开思维链（更慢更准） | `agent --think` |
 | `--no-shell` | 禁用命令执行 | `agent --no-shell` |
 | `--jail` | 读也限制在工作目录 | `agent --jail` |
@@ -251,7 +252,7 @@ agent
 | `read_file` | `path`, `offset`, `limit` | 单次最多 2000 行，大文件分段读 | 看代码 |
 | `write_file` | `path`, `content` | 受写权限限制，覆盖同名文件 | 新建文件 |
 | `replace_in_file` | `path`, `old`, `new` | 原文必须唯一匹配，否则报错 | 改代码（首选） |
-| `shell` | `command` | 60 秒超时，输出截断 8000 字，黑名单拦截 | 跑测试、装依赖、git |
+| `shell` | `command` | 180 秒超时（可调），输出截断 8000 字，黑名单拦截 | 跑测试、装依赖、git |
 | `web_search` | `query`, `top_k` | 最多 10 条，走 Bing | 查版本号、报错信息 |
 | `fetch_url` | `url`, `max_chars` | 2MB / 25 秒，默认 4000 字，只能公网 | 看文档 |
 
@@ -297,6 +298,7 @@ agent
 | `allow_shell` | bool | `true` | 关掉就只剩文件工具 |
 | `jail` | bool | `false` | `true` = 读也限制在工作目录 |
 | `write_roots` | array | 家目录 + 当前盘符 | 额外可写目录 |
+| `shell_timeout` | int | `180` | 单条命令最多跑多少秒 |
 
 ### 环境变量
 
@@ -355,6 +357,16 @@ curl http://127.0.0.1:11434/api/version
 agent --list-models
 agent -m qwen3.5:4b
 ```
+
+**`git clone` 失败 / 卡住**
+
+先看报错类型：
+
+- `命令超时（上限 180s）` —— 仓库太大，或网速太慢。加 `--depth 1` 只拉最新一次提交；仍超时就 `agent --shell-timeout 900`。
+- `could not read Username` / `Authentication failed` —— 私有仓库需要凭证。shell 里已设 `GIT_TERMINAL_PROMPT=0`，不会卡在等你输密码，而是直接报错。先把凭证配好（SSH key 或 `git config credential.helper`）。
+- `destination path already exists` —— 上次超时被杀死留下的半个目录，先删掉再重试。
+
+克隆本身不走 agent 的写权限限制，但目标目录必须在可执行命令的范围内。
 
 **回答很慢**
 

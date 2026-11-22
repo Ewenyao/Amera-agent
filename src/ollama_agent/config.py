@@ -53,6 +53,8 @@ def resolve(args) -> dict:
             or "http://127.0.0.1:11434")
     num_ctx = int(args.num_ctx or env.get("OLLAMA_NUM_CTX") or cfg.get("num_ctx") or 4096)
     max_steps = int(args.max_steps or cfg.get("max_steps") or 12)
+    shell_timeout = int(args.shell_timeout or env.get("AGENT_SHELL_TIMEOUT")
+                        or cfg.get("shell_timeout") or 180)
     think = bool(args.think or cfg.get("think", False))
 
     read_all = not args.jail
@@ -75,6 +77,7 @@ def resolve(args) -> dict:
         "host": host,
         "num_ctx": num_ctx,
         "max_steps": max_steps,
+        "shell_timeout": shell_timeout,
         "think": think,
         "read_all": read_all,
         "write_roots": write_roots,

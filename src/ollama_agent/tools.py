@@ -18,7 +18,7 @@ from pathlib import Path
 
 MAX_FETCH_BYTES = 2_000_000
 FETCH_TIMEOUT = 25
-SHELL_TIMEOUT = 60
+SHELL_TIMEOUT = 180
 
 # 只挡破坏性操作。判权限的事交给操作系统，别在这里层层设卡。
 SHELL_BLACKLIST = [
@@ -162,6 +162,56 @@ def _decode_output(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
+def _strip_progress(text: str) -> str:
+    """git/pip/npm 用 \\r 覆盖同一行刷进度，只保留每行最后的状态。"""
+    if "\r" not in text:
+        return text
+    text = text.replace("\r\n", "\n")  # 先护住 Windows 的 CRLF，别把它当进度符
+    out = []
+    for line in text.split("\n"):
+        parts = [seg for seg in line.split("\r") if seg]
+        out.append(parts[-1] if parts else "")
+    return "\n".join(out)
+
+
+def _kill_tree(proc):
+    """连子孙进程一起杀。git 会派生子进程，只 kill 父进程会留下僵尸持有管道。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15)
+        else:
+            os.killpg(os.getpgid(proc.pid), 9)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _run_with_tree_kill(cmd, cwd, timeout, env):
+    """跑命令，超时就把整棵进程树干掉，返回 (returncode, stdout, stderr, timed_out)。"""
+    kwargs = dict(shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            out, err = b"", b""
+        return (proc.returncode if proc.returncode is not None else -1), out, err, True
+
+
 class ToolError(Exception):
     pass
 
@@ -285,19 +335,38 @@ class ToolBox:
         for pat in SHELL_BLACKLIST:
             if re.search(pat, cmd, re.IGNORECASE):
                 return f"命令被拒绝（命中破坏性操作黑名单）: {cmd}"
+
+        env = os.environ.copy()
+        # 子进程不能等人输入，也不能弹凭证窗口，否则会一直挂到超时
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        env.setdefault("GIT_ASKPASS", "echo")
+        env.setdefault("GCM_INTERACTIVE", "never")
+        env.setdefault("PIP_NO_INPUT", "1")
+        env.setdefault("GIT_OPTIONAL_LOCKS", "0")
+
+        t0 = time.time()
         try:
-            proc = subprocess.run(cmd, shell=True, cwd=str(self.root), capture_output=True,
-                                  timeout=self.shell_timeout)
-        except subprocess.TimeoutExpired:
-            return f"命令超时（>{self.shell_timeout}s）: {cmd}"
+            returncode, out_raw, err_raw, timed_out = _run_with_tree_kill(
+                cmd, str(self.root), self.shell_timeout, env)
         except OSError as exc:
             return f"执行失败: {exc}"
-        out = _decode_output(proc.stdout or b"")
-        err = _decode_output(proc.stderr or b"")
+
+        out = _strip_progress(_decode_output(out_raw or b""))
+        err = _strip_progress(_decode_output(err_raw or b""))
         text = out + (("\n[stderr]\n" + err) if err.strip() else "")
         text = text.strip() or "(无输出)"
-        if proc.returncode != 0:
-            text = f"[exit {proc.returncode}]\n{text}"
+
+        if timed_out:
+            spent = time.time() - t0
+            hint = ""
+            if "git clone" in cmd or "git fetch" in cmd or "git pull" in cmd:
+                hint = ("\n（git 网络操作常见两种解法：加 --depth 1 只拉最新一次提交，"
+                        "或用 --shell-timeout 调大上限。超时被杀的克隆可能留下半个目录，需要先删掉再重试）")
+            return (f"命令超时（上限 {self.shell_timeout}s，实际 {spent:.0f}s），进程树已终止: {cmd}{hint}"
+                    f"\n--- 已产生的输出 ---\n{text[:2000]}")
+
+        if returncode != 0:
+            text = f"[exit {returncode}]\n{text}"
         if len(text) > 8000:
             text = text[:8000] + "\n...（输出过长，已截断）"
         return text
