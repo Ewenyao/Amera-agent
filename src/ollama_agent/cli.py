@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import resolve
+from .install import InstallError, install as install_skills
 from .llm import OllamaClient, OllamaError
 from .loop import Agent
 from .project_scan import AGENTS_FILE, INIT_PROMPT, load_context, save_context, scan_project
@@ -18,6 +19,7 @@ from .skills import (ensure_example, global_skills_dir, load_skills, match_skill
 from .tools import TOOL_SCHEMAS, ToolBox
 
 BOLD, DIM, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[33m", "\033[0m"
+SKILL_CHARS = 400
 
 
 def use_color() -> bool:
@@ -189,11 +191,13 @@ def handle_skills(cfg, agent, toolbox, skills, manual, paint):
             print()
             return skills, manual
 
-    manual &= {s.name for s in skills}
+    manual = {n: True for n in manual if any(s.name == n for s in skills)}
     print()
+    width = min(max((len(s.name) for s in skills), default=10), 24)
     for i, s in enumerate(skills, 1):
         mark = paint("✓", CYAN) if s.name in manual else " "
-        print(f"  [{mark}] {i}. {s.name:<16} {s.size:>4}字  {s.scope:<7} {s.description[:40]}")
+        name = s.name if len(s.name) <= width else s.name[:width - 1] + "…"
+        print(f"  [{mark}] {i:>2}. {name:<{width}} {s.size:>4}字  {s.scope:<7} {s.description[:36]}")
     print(paint(f"  已加载 {len(manual)}/{len(skills)}；手动加载的执行时不再确认", DIM))
     print(paint("  输入编号切换（空格分隔），回车返回: ", DIM), end="")
 
@@ -212,21 +216,25 @@ def handle_skills(cfg, agent, toolbox, skills, manual, paint):
             if 0 <= idx < len(skills):
                 name = skills[idx].name
                 if name in manual:
-                    manual.discard(name)
+                    manual.pop(name, None)
                 else:
-                    manual.add(name)
+                    manual[name] = True
 
-    picked = [s for s in skills if s.name in manual]
+    picked = [s for name in manual for s in skills if s.name == name]
     agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
+    _block, skipped = render_skills(picked)
     names = "、".join(s.name for s in picked) or "无"
-    print(paint(f"  已加载：{names}\n", CYAN))
+    print(paint(f"  已加载：{names}", CYAN))
+    if skipped:
+        print(paint(f"  超过字数上限，未注入：{'、'.join(skipped)}", YELLOW))
+    print()
     return skills, manual
 
 
 def prepare_skills(cfg, agent, toolbox, skills, task, manual, confirmed, paint,
                    interactive=True):
     """每轮决定注入哪些技能：手动加载的直接用，自动匹配的要先问一次。"""
-    picked = [s for s in skills if s.name in manual]
+    picked = [s for name in manual for s in skills if s.name == name]
     names = {s.name for s in picked}
 
     auto = [s for s in match_skills(skills, task) if s.name not in names]
@@ -260,7 +268,7 @@ def prepare_skills(cfg, agent, toolbox, skills, task, manual, confirmed, paint,
 
 
 def repl(cfg, client, toolbox, agent, paint, skills):
-    manual, confirmed = set(), set()
+    manual, confirmed = {}, set()   # manual 用 dict 记顺序：先选的先占预算
     printer = Printer(paint)
     messages = []
     thin = paint("─" * 64, DIM)
@@ -301,6 +309,21 @@ def repl(cfg, client, toolbox, agent, paint, skills):
                 print(paint("  上下文已清空。\n", DIM))
                 continue
             if cmd == "/skills":
+                if arg.strip().startswith("install "):
+                    url = arg.strip()[len("install "):].strip()
+                    try:
+                        res = install_skills(url, project_skills_dir(cfg["root"]),
+                                             SKILL_CHARS, False)
+                        print(paint(f"  写入 {len(res['added'])} 个技能到 {res['dest']}", CYAN))
+                        for name, size in res["added"]:
+                            print(f"    + {name:<28} {size:>4}字")
+                        if res["skipped"]:
+                            print(paint("  跳过：" + "、".join(n for n, _ in res["skipped"]), YELLOW))
+                        skills = load_skills(cfg["root"])
+                    except InstallError as exc:
+                        print(paint(f"  安装失败：{exc}", YELLOW))
+                    print()
+                    continue
                 skills, manual = handle_skills(cfg, agent, toolbox, skills, manual, paint)
                 continue
             if cmd == "/tools":
@@ -378,6 +401,13 @@ def main(argv=None):
     ap.add_argument("--root", help="workspace dir (default: current dir)")
     ap.add_argument("--init", action="store_true", help="scan cwd, write AGENTS.md, exit")
     ap.add_argument("--list-models", action="store_true", help="list local models and exit")
+    ap.add_argument("--install-skills", metavar="URL",
+                    help="download SKILL.md files from a GitHub repo into the skills dir")
+    ap.add_argument("--skills-global", action="store_true",
+                    help="with --install-skills: install to the global skills dir")
+    ap.add_argument("--skill-chars", type=int, default=SKILL_CHARS,
+                    help="per-skill body limit when installing (default 400)")
+    ap.add_argument("--force", action="store_true", help="overwrite existing skill files")
     ap.add_argument("--version", action="version", version=f"ollama-agent {__version__}")
     args = ap.parse_args(argv)
 
@@ -402,6 +432,22 @@ def main(argv=None):
             mark = "tools" if "tools" in caps else paint("no tools", YELLOW)
             extra = ",".join(c for c in caps if c not in ("completion", "tools"))
             print(f"{n:<24} {mark:<9} {extra}")
+        return 0
+
+    if args.install_skills:
+        dest = global_skills_dir() if args.skills_global else project_skills_dir(cfg["root"])
+        try:
+            res = install_skills(args.install_skills, dest, args.skill_chars, args.force)
+        except InstallError as exc:
+            print(paint(str(exc), YELLOW), file=sys.stderr)
+            return 1
+        print(paint(f"  从 {res['repo']} 读取 {res['total']} 个技能", DIM))
+        print(f"  写入 {len(res['added'])} 个 -> {res['dest']}")
+        for name, size in res["added"]:
+            print(f"    + {name:<28} {size:>4}字")
+        if res["skipped"]:
+            print(paint("  跳过 " + "、".join(f"{n}（{r}）" for n, r in res["skipped"]), YELLOW))
+        print(paint("  下一步：进 agent 敲 /skills 选择要加载的\n", DIM))
         return 0
 
     if args.init:

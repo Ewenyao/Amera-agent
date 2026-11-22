@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .config import config_path
 
-RENDER_LIMIT = 800  # 注入系统提示的总字数上限
+RENDER_LIMIT = 1200  # 注入系统提示的总字数上限
 
 
 @dataclass

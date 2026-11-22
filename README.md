@@ -27,7 +27,8 @@
 | 工具 | `web_search` | Bing 搜索，返回标题 / 链接 / 摘要 |
 | 工具 | `fetch_url` | 抓网页，HTML 转纯文本，2MB 上限 |
 | 技能 | 技能文件 | `.agent/skills/*.md` 与全局 `skills/*.md`，按需拼进系统提示 |
-| 技能 | 总长保护 | 启用技能正文合计超过 800 字会跳过超出的，不挤爆上下文 |
+| 技能 | 总长保护 | 已加载技能正文合计超过 1200 字会跳过超出的，不挤爆上下文 |
+| 技能 | 从仓库安装 | `--install-skills <url>` 拉 GitHub 上的 SKILL.md，压缩后落到技能目录 |
 | 技能 | 会话内选择 | `/skills` 交互式加载，重启即清空，不落盘 |
 | 技能 | 自动判断 + 确认 | 未手动加载的技能按任务匹配，用前先问一次，同意后本会话免问 |
 | 上下文 | 项目说明 | `/init` 生成 `AGENTS.md`，每次启动自动加载 |
@@ -403,11 +404,53 @@ front matter 可省略，省略时文件名就是技能名。
 
 判断不到相关技能就不会问，也不会塞技能。
 
+### 从 GitHub 安装技能包
+
+superpowers 这类仓库把技能写成 `skills/<名字>/SKILL.md`，十几个文件、每个几千到上万字。一条命令装进来：
+
+```bash
+agent --install-skills https://github.com/obra/superpowers
+```
+
+输出：
+
+```
+  从 obra/superpowers 读取 15 个技能
+  写入 15 个 -> D://proj//.agent//skills
+    + brainstorming                 308字
+    + systematic-debugging          199字
+    + test-driven-development       179字
+    ...
+  下一步：进 agent 敲 /skills 选择要加载的
+```
+
+装完在 agent 里 `/skills` 就能看到，输入编号加载。
+
+会话内也能装：`/skills install <url>`。
+
+| 参数 | 作用 |
+|---|---|
+| `--skills-global` | 装到全局目录，跨项目可用 |
+| `--skill-chars 600` | 每个技能压缩到多少字（默认 400） |
+| `--force` | 覆盖同名技能（默认跳过） |
+
+**压缩是有损的，而且必须损。** 原文件 15KB，我们的注入预算是 1200 字。抽取策略是：抓 "Iron Law" 类小节里的代码块 + 每个小节的第一段，跳过 "When to Use" 触发器列表。留下的是骨架：
+
+```
+NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
+Core principle: ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
+You MUST complete each phase before proceeding to the next.
+```
+
+代价：具体话术、模板、分支判断全丢。要完整规则去看原仓库。
+
+安装器只认 `SKILL.md`，不看仓库的插件配置、hooks 或 JS 脚本。这些在 ollama-agent 里没有对应机制，装了也没用。
+
 ### 规则边界
 
 - **不会自动加载你手动选过的以外的技能**：没问过就不注入。
 - **一次性模式不加载未确认的技能**：`agent "任务"` 没法弹确认，只有手动加载的才生效。
-- **总长 800 字上限**：超出会跳过并提示。
+- **总长 1200 字上限**：超出会跳过并提示，先选的优先保留。
 - **技能是提示词，不是硬约束**。4B 关思维链时经常无视，实测同一技能开 `--think` 才照做。
 - **不要放密钥**：内容原样进系统提示。
 - **技能不需要审批，工具才需要**。技能只是文字；真正会改文件、跑命令的是工具调用。
