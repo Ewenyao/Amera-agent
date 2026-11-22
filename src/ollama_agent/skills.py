@@ -1,30 +1,23 @@
-"""Skills: markdown snippets the user can toggle on, injected into the system prompt.
+"""Skills: markdown rules loaded per session.
 
 Two scopes:
   project  <workspace>/.agent/skills/<name>.md
-  global   <config dir>/skills/<name>.md      (e.g. ~/.config/ollama-agent/skills)
+  global   <config dir>/skills/<name>.md
 
-A skill file may start with YAML-ish front matter:
-
-    ---
-    name: commit
-    description: 生成 Conventional Commits 格式的提交信息
-    ---
-    正文规则...
-
-Project skills win when names collide.
+Nothing is persisted: every agent start begins with zero skills loaded.
+The user picks some in /skills (manual, pre-approved for this session); the
+agent also auto-picks relevant ones per task and asks before using those.
 """
 
 from __future__ import annotations
 
-import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import config_path
 
-RENDER_LIMIT = 800  # 技能正文合计上限，别把 4096 的窗口吃光
+RENDER_LIMIT = 800  # 注入系统提示的总字数上限
 
 
 @dataclass
@@ -34,7 +27,6 @@ class Skill:
     body: str
     scope: str
     path: Path
-    enabled: bool = False
 
     @property
     def size(self) -> int:
@@ -73,11 +65,9 @@ def _parse(text: str, fallback_name: str):
     return name, desc, body.strip()
 
 
-def load_skills(root, enabled=None) -> list:
-    """先读全局，再用项目级覆盖同名项。"""
-    enabled = set(enabled or [])
+def load_skills(root) -> list:
+    """全局先读，项目同名覆盖。"""
     found = {}
-
     for scope, directory in (("global", global_skills_dir()),
                              ("project", project_skills_dir(root))):
         try:
@@ -92,20 +82,17 @@ def load_skills(root, enabled=None) -> list:
             name, desc, body = _parse(text, path.stem)
             if not body:
                 continue
-            found[name] = Skill(name=name, description=desc, body=body,
-                                scope=scope, path=path, enabled=name in enabled)
-
+            found[name] = Skill(name, desc, body, scope, path)
     return sorted(found.values(), key=lambda s: (s.scope != "project", s.name))
 
 
-def render_enabled(skills, limit: int = RENDER_LIMIT):
-    """拼成系统提示里的一段。超出上限的会被跳过，返回 (文本, 被跳过的名字)。"""
-    active = [s for s in skills if s.enabled]
-    if not active:
+def render_skills(skills, limit: int = RENDER_LIMIT):
+    """拼成系统提示的一段。超上限的跳过，返回 (文本, 被跳过的名字)。"""
+    if not skills:
         return "", []
 
     blocks, used, skipped = [], 0, []
-    for skill in active:
+    for skill in skills:
         text = skill.render()
         if used + len(text) > limit:
             skipped.append(skill.name)
@@ -115,10 +102,10 @@ def render_enabled(skills, limit: int = RENDER_LIMIT):
 
     if not blocks:
         return "", skipped
-    return "## 已启用的技能\n" + "\n\n".join(blocks) + "\n", skipped
+    return "## 本次可用的技能\n" + "\n\n".join(blocks) + "\n", skipped
 
 
-# ---------------------------------------------------------------- 相关性筛选
+# ---------------------------------------------------------------- 相关性判断
 
 STOP_TERMS = {
     "the", "and", "for", "with", "this", "that", "you", "are", "can", "was",
@@ -127,50 +114,41 @@ STOP_TERMS = {
 
 
 def _terms(text: str) -> set:
-    """英文按词，中文按 2-gram。够用就行，重点是别把无关技能塞进来。"""
+    """英文按词，中文按 2-gram。"""
     low = (text or "").lower()
-    words = {w for w in re.findall(r"[a-z0-9_\-]{3,}", low)}
+    words = set(re.findall(r"[a-z0-9_\-]{3,}", low))
     grams = set()
     for run in re.findall(r"[\u4e00-\u9fff]+", low):
-        if len(run) == 1:
-            continue
-        grams.update(run[i:i + 2] for i in range(len(run) - 1))
+        if len(run) > 1:
+            grams.update(run[i:i + 2] for i in range(len(run) - 1))
     return {t for t in (words | grams) if t not in STOP_TERMS}
 
 
-def score_skill(skill, task_terms: set) -> int:
-    """名字命中权重最高，描述次之，正文最低。"""
+def score_skill(skill: Skill, task_terms: set) -> int:
     if not task_terms:
         return 0
     name_terms = _terms(skill.name.replace("-", " ").replace("_", " "))
     desc_terms = _terms(skill.description)
     body_terms = _terms(skill.body)
-    score = 3 * len(name_terms & task_terms)
-    score += 2 * len(desc_terms & task_terms)
-    score += len(body_terms & task_terms)
-    return score
+    return (3 * len(name_terms & task_terms)
+            + 2 * len(desc_terms & task_terms)
+            + len(body_terms & task_terms))
 
 
-def select_skills(skills, task: str, max_skills: int = 3):
-    """按任务挑技能。返回 (选中的技能, 是否命中)。
-
-    一个都没命中时返回全部启用技能（fail-open），避免因为措辞差异把规则丢掉。
-    """
-    enabled = [s for s in skills if s.enabled]
-    if len(enabled) <= 1:
-        return enabled, True
+def match_skills(skills, task: str, max_skills: int = 3):
+    """只返回和任务相关的技能，一个都没命中就返回空列表。"""
+    if not skills:
+        return []
+    if len(skills) == 1:
+        return list(skills)
 
     terms = _terms(task)
-    ranked = sorted(((score_skill(s, terms), s) for s in enabled),
-                    key=lambda pair: -pair[0])
-    hits = [s for score, s in ranked if score > 0][:max_skills]
-    if not hits:
-        return enabled, False
-    return hits, True
+    ranked = sorted(((score_skill(s, terms), s) for s in skills), key=lambda p: -p[0])
+    return [s for score, s in ranked if score > 0][:max_skills]
 
 
 def ensure_example(root):
-    """给没有技能的项目放一个示例，降低上手成本。返回新建路径或 None。"""
+    """给没有技能的项目放一个示例。返回新建路径或 None。"""
     target_dir = project_skills_dir(root)
     if target_dir.exists() and any(target_dir.glob("*.md")):
         return None
@@ -186,8 +164,8 @@ def ensure_example(root):
         "name: commit\n"
         "description: 生成 Conventional Commits 格式的提交信息\n"
         "---\n"
-        "写提交信息时：一行标题不超过 72 字符，格式 `type(scope): summary`；"
-        "type 只能是 feat/fix/docs/refactor/test/chore；正文说明为什么改，不要复述改了什么。\n",
+        "写提交信息时：标题不超过 72 字符，格式 `type(scope): summary`；"
+        "type 只能是 feat/fix/docs/refactor/test/chore；正文说为什么改，不要复述改了什么。\n",
         encoding="utf-8",
     )
     return path

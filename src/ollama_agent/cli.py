@@ -9,12 +9,12 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import resolve, save_setting, save_skills
+from .config import resolve
 from .llm import OllamaClient, OllamaError
 from .loop import Agent
 from .project_scan import AGENTS_FILE, INIT_PROMPT, load_context, save_context, scan_project
-from .skills import (ensure_example, global_skills_dir, load_skills,
-                    project_skills_dir, render_enabled, select_skills)
+from .skills import (ensure_example, global_skills_dir, load_skills, match_skills,
+                    project_skills_dir, render_skills)
 from .tools import TOOL_SCHEMAS, ToolBox
 
 BOLD, DIM, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[33m", "\033[0m"
@@ -64,7 +64,7 @@ def build_system_prompt(cfg, toolbox, skills=None):
     if ctx:
         prompt += f"\n## 项目上下文（{AGENTS_FILE}）\n{ctx}\n"
 
-    block, _skipped = render_enabled(skills or [])
+    block, _skipped = render_skills(skills or [])
     if block:
         prompt += "\n" + block
     return prompt
@@ -92,7 +92,7 @@ def make_stack(cfg, paint):
     toolbox = ToolBox(cfg["root"], allow_shell=cfg["allow_shell"],
                       write_roots=cfg["write_roots"], read_all=cfg["read_all"],
                       shell_timeout=cfg["shell_timeout"])
-    skills = load_skills(cfg["root"], cfg["skills"])
+    skills = load_skills(cfg["root"])
     agent = Agent(client, toolbox, build_system_prompt(cfg, toolbox, skills),
                   max_steps=cfg["max_steps"])
     return client, toolbox, agent, skills
@@ -156,130 +156,111 @@ HELP = """命令:
   /init          扫描当前目录生成 AGENTS.md
   /clear         清空对话上下文
   /model [名字]  查看或切换模型
-  /skills        技能列表与开关（on/off/auto/confirm/init/reload）
+  /skills        选择本轮会话要加载的技能（交互式）
   /tools         列出可用工具
   /exit          退出
 其它输入都当任务发给模型。"""
 
 
-def _persist_skills(cfg, agent, toolbox, skills, paint):
-    save_skills([s.name for s in skills if s.enabled])
-    agent.system_prompt = build_system_prompt(cfg, toolbox, skills)
-    block, skipped = render_enabled(skills)
+def _log_skipped(skipped, paint):
     if skipped:
-        print(paint(f"  注意：技能总长超过 {len(block)} 字上限，{', '.join(skipped)} 没被注入。", YELLOW))
+        print(paint(f"  技能总长超上限，未注入：{', '.join(skipped)}", YELLOW))
 
 
-def handle_skills(arg, cfg, agent, toolbox, skills, paint):
-    action, _, target = arg.strip().partition(" ")
-    action = action.lower()
-    target = target.strip()
+def handle_skills(cfg, agent, toolbox, skills, manual, paint):
+    """交互式选择本轮会话要加载的技能。单次提示，不做循环，避免吃掉后续输入。"""
+    skills = load_skills(cfg["root"])
 
-    if action in ("", "list"):
-        if not skills:
-            print(paint(f"  没有技能。项目目录：{project_skills_dir(cfg['root'])}", DIM))
-            print(paint("  用 /skills init 生成一个示例，或把 .md 文件放进上面两个目录。", DIM))
-            print(paint(f"  全局目录：{global_skills_dir()}\n", DIM))
-            return skills
-
-        on = sum(1 for s in skills if s.enabled)
-        print(f"  技能 {len(skills)} 个，启用 {on} 个")
-        for s in skills:
-            mark = paint("on ", CYAN) if s.enabled else paint("off", DIM)
-            print(f"  [{mark}] {s.name:<16} {s.size:>4}字  {s.scope:<7} {s.description[:44]}")
-        print(paint(f"  项目: {project_skills_dir(cfg['root'])}", DIM))
-        print(paint(f"  全局: {global_skills_dir()}", DIM))
-        auto = "on" if cfg.get("skills_auto") else "off"
-        conf = "on" if cfg.get("skills_confirm") else "off"
-        print(paint(f"  自动筛选: {auto}  使用前确认: {conf}", DIM))
-        print(paint("  /skills on|off <名字> · auto on|off · confirm on|off · init · reload\n", DIM))
-        return skills
-
-    if action == "init":
-        path = ensure_example(cfg["root"])
-        if path:
-            print(paint(f"  已创建示例技能 {path}", CYAN))
-        else:
-            print(paint("  项目里已经有技能了，没重复创建。", DIM))
-        skills = load_skills(cfg["root"], cfg["skills"])
-        _persist_skills(cfg, agent, toolbox, skills, paint)
-        return skills
-
-    if action == "reload":
-        skills = load_skills(cfg["root"], cfg["skills"])
-        _persist_skills(cfg, agent, toolbox, skills, paint)
-        print(paint(f"  已重新扫描，共 {len(skills)} 个。\n", DIM))
-        return skills
-
-    if action in ("auto", "confirm"):
-        if target not in ("on", "off"):
-            print(paint(f"  用法：/skills {action} on|off\n", YELLOW))
-            return skills
-        key = f"skills_{action}"
-        cfg[key] = (target == "on")
-        save_setting(key, cfg[key])
-        state = "开" if cfg[key] else "关"
-        extra = ""
-        if action == "auto" and cfg[key]:
-            extra = "（每轮按任务关键词挑相关技能）"
-        if action == "confirm" and cfg[key]:
-            extra = "（用技能前先问你一句）"
-        print(paint(f"  技能{action}已{state}{extra}。\n", CYAN))
-        return skills
-
-    if action in ("on", "off"):
-        if not target:
-            print(paint(f"  用法：/skills {action} <名字>\n", YELLOW))
-            return skills
-        if action == "off" and target == "all":
-            for s in skills:
-                s.enabled = False
-            _persist_skills(cfg, agent, toolbox, skills, paint)
-            print(paint("  已关闭全部技能。\n", DIM))
-            return skills
-
-        match = next((s for s in skills if s.name == target), None)
-        if match is None:
-            lowered = target.lower()
-            match = next((s for s in skills if s.name.lower() == lowered), None)
-        if match is None:
-            print(paint(f"  没有叫 {target} 的技能。/skills 看列表。\n", YELLOW))
-            return skills
-
-        match.enabled = (action == "on")
-        _persist_skills(cfg, agent, toolbox, skills, paint)
-        print(paint(f"  {match.name} 已{'启用' if match.enabled else '关闭'}。\n", CYAN))
-        return skills
-
-    print(paint("  用法：/skills [list|on 名字|off 名字|off all|init|reload]\n", YELLOW))
-    return skills
-
-
-def prepare_skills(cfg, agent, toolbox, skills, task, paint, interactive=True):
-    """按任务决定这一轮注入哪些技能；开了 confirm 就先问一句。"""
-    enabled = [s for s in skills if s.enabled]
-    picked, note = enabled, ""
-    if cfg.get("skills_auto") and enabled:
-        picked, matched = select_skills(skills, task)
-        if not matched:
-            note = "（没匹配到关键词，按全部启用处理）"
-
-    if cfg.get("skills_confirm") and picked and interactive:
-        names = "、".join(s.name for s in picked)
-        print(paint(f"  本次技能：{names}{note}", CYAN))
+    if not skills:
+        print(paint(f"  没有技能。把 .md 放进：{project_skills_dir(cfg['root'])}", DIM))
+        print(paint(f"  或全局目录：{global_skills_dir()}", DIM))
+        print(paint("  现在生成一个示例？[y/N]: ", DIM), end="")
         try:
-            ans = input(paint("  继续？[Y/n] ", BOLD)).strip().lower()
+            ans = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
-            ans = "n"
-        if ans in ("n", "no", "不", "否"):
-            picked = []
-            print(paint("  已跳过技能，仅用基础规则执行。", DIM))
+            print()
+            return skills, manual
+        if ans == "y":
+            path = ensure_example(cfg["root"])
+            if path:
+                print(paint(f"  已创建 {path}", CYAN))
+                skills = load_skills(cfg["root"])
+        if not skills:
+            print()
+            return skills, manual
 
+    manual &= {s.name for s in skills}
+    print()
+    for i, s in enumerate(skills, 1):
+        mark = paint("✓", CYAN) if s.name in manual else " "
+        print(f"  [{mark}] {i}. {s.name:<16} {s.size:>4}字  {s.scope:<7} {s.description[:40]}")
+    print(paint(f"  已加载 {len(manual)}/{len(skills)}；手动加载的执行时不再确认", DIM))
+    print(paint("  输入编号切换（空格分隔），回车返回: ", DIM), end="")
+
+    try:
+        line = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return skills, manual
+    print()
+
+    if line:
+        for token in line.replace(",", " ").split():
+            if not token.isdigit():
+                continue
+            idx = int(token) - 1
+            if 0 <= idx < len(skills):
+                name = skills[idx].name
+                if name in manual:
+                    manual.discard(name)
+                else:
+                    manual.add(name)
+
+    picked = [s for s in skills if s.name in manual]
     agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
+    names = "、".join(s.name for s in picked) or "无"
+    print(paint(f"  已加载：{names}\n", CYAN))
+    return skills, manual
+
+
+def prepare_skills(cfg, agent, toolbox, skills, task, manual, confirmed, paint,
+                   interactive=True):
+    """每轮决定注入哪些技能：手动加载的直接用，自动匹配的要先问一次。"""
+    picked = [s for s in skills if s.name in manual]
+    names = {s.name for s in picked}
+
+    auto = [s for s in match_skills(skills, task) if s.name not in names]
+    if auto:
+        ask = [s for s in auto if s.name not in confirmed]
+        if ask and interactive:
+            label = "、".join(s.name for s in ask)
+            print(paint(f"  这轮想用技能：{label}", CYAN))
+            try:
+                ans = input(paint("  允许？[Y/n] ", BOLD)).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans in ("n", "no", "不", "否"):
+                auto = [s for s in auto if s.name in confirmed]
+                print(paint("  已跳过，用基础规则执行。", DIM))
+            else:
+                confirmed.update(s.name for s in ask)
+        elif ask and not interactive:
+            # 一次性模式没法问，就不擅自加载
+            auto = [s for s in auto if s.name in confirmed]
+
+        for s in auto:
+            if s.name not in names:
+                picked.append(s)
+                names.add(s.name)
+
+    block, skipped = render_skills(picked)
+    agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
+    _log_skipped(skipped, paint)
     return picked
 
 
 def repl(cfg, client, toolbox, agent, paint, skills):
+    manual, confirmed = set(), set()
     printer = Printer(paint)
     messages = []
     thin = paint("─" * 64, DIM)
@@ -292,8 +273,7 @@ def repl(cfg, client, toolbox, agent, paint, skills):
     print(f"  服务   {cfg['host']}")
     print(f"  上下文 {ctx}")
     if skills:
-        on = sum(1 for s in skills if s.enabled)
-        print(f"  技能   {on}/{len(skills)} 启用")
+        print(f"  技能   {len(skills)} 个可用，未加载（/skills 选）")
     print(thin)
     print(paint("  直接说要做的事。/help 看命令，/exit 退出。\n", DIM))
 
@@ -321,7 +301,7 @@ def repl(cfg, client, toolbox, agent, paint, skills):
                 print(paint("  上下文已清空。\n", DIM))
                 continue
             if cmd == "/skills":
-                skills = handle_skills(arg, cfg, agent, toolbox, skills, paint)
+                skills, manual = handle_skills(cfg, agent, toolbox, skills, manual, paint)
                 continue
             if cmd == "/tools":
                 for t in TOOL_SCHEMAS:
@@ -353,7 +333,7 @@ def repl(cfg, client, toolbox, agent, paint, skills):
             print(paint(f"  不认识 {cmd}，/help 看看。\n", YELLOW))
             continue
 
-        prepare_skills(cfg, agent, toolbox, skills, raw, paint)
+        prepare_skills(cfg, agent, toolbox, skills, raw, manual, confirmed, paint)
         messages.append({"role": "user", "content": raw})
         print()
         t0 = time.time()
@@ -388,10 +368,6 @@ def main(argv=None):
     ap.add_argument("--host", help="Ollama base url (default: http://127.0.0.1:11434)")
     ap.add_argument("--num-ctx", type=int, help="context window (default 4096)")
     ap.add_argument("--max-steps", type=int, help="max tool rounds (default 12)")
-    ap.add_argument("--skills-auto", action="store_true",
-                    help="pick only task-relevant skills each turn")
-    ap.add_argument("--skills-confirm", action="store_true",
-                    help="ask before using skills on a task")
     ap.add_argument("--shell-timeout", type=int,
                     help="seconds before a shell command is killed (default 180)")
     ap.add_argument("--think", action="store_true", help="enable thinking (slower)")

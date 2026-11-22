@@ -24,19 +24,6 @@ def save_file(data: dict) -> Path:
     return p
 
 
-def save_setting(key: str, value) -> Path:
-    data = load_file()
-    data[key] = value
-    return save_file(data)
-
-
-def save_skills(names) -> Path:
-    """只更新 skills 字段，保留配置文件里的其它内容。"""
-    data = load_file()
-    data["skills"] = list(dict.fromkeys(names))
-    return save_file(data)
-
-
 def load_file() -> dict:
     p = config_path()
     if not p.exists():
@@ -102,8 +89,5 @@ def resolve(args) -> dict:
         "read_all": read_all,
         "write_roots": write_roots,
         "allow_shell": allow_shell,
-        "skills": list(cfg.get("skills") or []),
-        "skills_auto": bool(args.skills_auto or cfg.get("skills_auto", False)),
-        "skills_confirm": bool(args.skills_confirm or cfg.get("skills_confirm", False)),
         "root": str(Path(args.root or os.getcwd()).expanduser().resolve()),
     }

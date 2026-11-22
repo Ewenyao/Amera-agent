@@ -26,11 +26,10 @@
 | 工具 | `shell` | 执行命令，默认 180 秒超时，破坏性操作黑名单 |
 | 工具 | `web_search` | Bing 搜索，返回标题 / 链接 / 摘要 |
 | 工具 | `fetch_url` | 抓网页，HTML 转纯文本，2MB 上限 |
-| 技能 | 技能文件 | `.agent/skills/*.md` 与全局 `skills/*.md`，markdown 片段拼进系统提示 |
-| 技能 | 开关管理 | `/skills` 列出，`on` / `off` 切换，状态存配置文件 |
+| 技能 | 技能文件 | `.agent/skills/*.md` 与全局 `skills/*.md`，按需拼进系统提示 |
 | 技能 | 总长保护 | 启用技能正文合计超过 800 字会跳过超出的，不挤爆上下文 |
-| 技能 | 按任务筛选 | `/skills auto on` 后按关键词只注入相关技能，未命中回退全注入 |
-| 技能 | 使用前确认 | `/skills confirm on` 后每轮先列出将用的技能并等确认 |
+| 技能 | 会话内选择 | `/skills` 交互式加载，重启即清空，不落盘 |
+| 技能 | 自动判断 + 确认 | 未手动加载的技能按任务匹配，用前先问一次，同意后本会话免问 |
 | 上下文 | 项目说明 | `/init` 生成 `AGENTS.md`，每次启动自动加载 |
 | 上下文 | 窗口控制 | 超长对话自动裁剪历史，避免撑爆 `num_ctx` |
 | 上下文 | Token 统计 | 每轮结束显示输入 / 输出 token 和耗时 |
@@ -226,8 +225,6 @@ agent
 | `--num-ctx` | 上下文窗口 | `agent --num-ctx 8192` |
 | `--max-steps` | 最大工具轮数 | `agent --max-steps 6` |
 | `--shell-timeout` | 命令超时秒数 | `agent --shell-timeout 600` |
-| `--skills-auto` | 按任务挑技能 | `agent --skills-auto` |
-| `--skills-confirm` | 用技能前先确认 | `agent --skills-confirm` |
 | `--think` | 开思维链（更慢更准） | `agent --think` |
 | `--no-shell` | 禁用命令执行 | `agent --no-shell` |
 | `--jail` | 读也限制在工作目录 | `agent --jail` |
@@ -245,11 +242,7 @@ agent
 | `/model` | 显示当前模型和本地可用模型 |
 | `/model qwen3:8b` | 切换模型（会清空当前对话） |
 | `/clear` | 清空对话上下文，工具和模型不变 |
-| `/skills` | 列出技能及启用状态 |
-| `/skills on <名字>` | 启用某个技能 |
-| `/skills off <名字>` | 关闭；`/skills off all` 全关 |
-| `/skills init` | 在项目里生成一个示例技能 |
-| `/skills reload` | 重新扫描技能目录（改完文件用） |
+| `/skills` | 交互式选择本轮会话加载哪些技能 |
 | `/tools` | 列出当前可用工具 |
 | `/help` | 帮助 |
 | `/exit` | 退出（`Ctrl+C` / `Ctrl+D` 同样） |
@@ -332,14 +325,14 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 
 ## 九、技能（Skills）
 
-技能就是一段会被拼进系统提示的 markdown。适合放"这个项目必须遵守的习惯"：提交信息格式、错误处理约定、日志规范。
+技能就是一段拼进系统提示的 markdown，放"这个项目必须遵守的习惯"：提交信息格式、日志规范、错误处理约定。
 
 ### 放哪里
 
-| 范围 | 路径 | 说明 |
-|---|---|---|
-| 项目 | `<工作目录>/.agent/skills/<名字>.md` | 跟项目走，可提交进 git |
-| 全局 | `~/.config/ollama-agent/skills/`（Windows：`%APPDATA%\ollama-agent\skills\`） | 跨项目共用 |
+| 范围 | 路径 |
+|---|---|
+| 项目 | `<工作目录>/.agent/skills/<名字>.md` |
+| 全局 | `~/.config/ollama-agent/skills/`（Windows：`%APPDATA%\ollama-agent\skills\`） |
 
 同名时项目级覆盖全局。
 
@@ -350,70 +343,58 @@ set OLLAMA_MODEL=qwen3:8b && agent   # Windows CMD
 name: commit
 description: 生成 Conventional Commits 格式的提交信息
 ---
-写提交信息时用 `type(scope): summary`，type 只能是 feat/fix/docs/refactor/test/chore。
-正文说明为什么改，不要复述改了什么。
+写提交信息用 `type(scope): summary`，type 只能是 feat/fix/docs/refactor/test/chore。
 ```
 
-front matter 可以省略，省略时文件名就是技能名。
+front matter 可省略，省略时文件名就是技能名。
 
-### 用法
+### 会话内选择：`/skills`
+
+技能不跨会话记忆。**每次启动都是"零加载"状态**，横幅会显示：
+
+```
+  技能   3 个可用，未加载（/skills 选）
+```
+
+敲 `/skills` 进交互选择，输入编号切换，回车返回：
 
 ```
 > /skills
-  技能 2 个，启用 1 个
-  [on ] commit             74字  project 生成 Conventional Commits 格式的提交信息
-  [off] no-preamble        22字  project 不要任何开场白
 
-> /skills on no-preamble
-  no-preamble 已启用。
+  [✓] 1. commit             72字  project 生成 Conventional Commits 格式的提交信息
+  [ ] 2. translate          15字  project 把文本翻译成英文
+  已加载 1/3；手动加载的执行时不再确认
+  输入编号切换（空格分隔），回车返回: 2
 
-> /skills off all
-  已关闭全部技能。
+  已加载：commit、translate
 ```
 
-启用状态写进配置文件（`skills` 字段），下次启动自动恢复。启动横幅会显示 `技能 1/2 启用`。
+**手动加载的技能，执行时不再询问**——你已经表过态了。
 
-### 按任务挑技能（可选）
+### 自动判断 + 使用前确认
 
-默认是「启用即注入」：所有启用的技能都进系统提示，模型自己看着办。
-
-打开自动筛选后，每轮先按任务关键词打分，只注入相关的 1～3 条：
+没手动加载的技能，agent 每一轮会按任务关键词自己判断要不要用（技能名 ×3、描述 ×2、正文 ×1，中文按 2-gram 切）。判断为相关时先问你：
 
 ```
-> /skills auto on
-  技能auto已开（每轮按任务关键词挑相关技能）
-
-> 帮我写一条提交信息
-  本次技能：commit
+> 把这句话翻译成英文：你好世界
+  这轮想用技能：translate
+  允许？[Y/n]
 ```
 
-打分规则很朴素：技能名命中 ×3，描述 ×2，正文 ×1；中文按 2-gram 切，英文按词。**一个都没命中时回退成全注入**（fail-open），并在确认提示里注明「没匹配到关键词」。
+- 回 `y` → 本轮用上，并且**本会话后续不再问**
+- 回 `n` → 这轮跳过，只用基础规则执行
+- 直接回车 → 等同 `y`
 
-不调额外模型，纯本地字符串匹配，零延迟。
+判断不到相关技能就不会问，也不会塞技能。
 
-### 使用前确认（可选）
+### 规则边界
 
-```
-> /skills confirm on
-> 帮我写一条提交信息
-  本次技能：commit
-  继续？[Y/n]
-```
-
-回 `n` 就跳过技能、只用基础规则执行任务（任务本身照跑）。这个开关只影响技能注入，不影响任务执行。
-
-两个开关都存在配置文件里（`skills_auto` / `skills_confirm`），也能用命令行临时指定：
-
-```bash
-agent --skills-auto --skills-confirm
-```
-
-### 注意事项
-
-- **技能是提示词，不是硬约束。** 4B 关掉思维链时经常无视，实测同一个"回答必须以【X】开头"的技能，`--think` 开着才照做。技能写得越具体、越靠近任务，命中率越高。
-- **总长有上限。** 所有启用技能的正文合计超过 800 字，超出的会被跳过，横幅下面会提示哪个没注入。4096 的窗口塞不下太多。
-- **不要放密钥。** 技能内容会原样进入系统提示。
-- **技能不需要审批，工具才需要。** 技能只是文字，不会执行任何动作；真正会改文件、跑命令的是工具调用。想拦住危险操作，该限制的是工具，不是技能。
+- **不会自动加载你手动选过的以外的技能**：没问过就不注入。
+- **一次性模式不加载未确认的技能**：`agent "任务"` 没法弹确认，只有手动加载的才生效。
+- **总长 800 字上限**：超出会跳过并提示。
+- **技能是提示词，不是硬约束**。4B 关思维链时经常无视，实测同一技能开 `--think` 才照做。
+- **不要放密钥**：内容原样进系统提示。
+- **技能不需要审批，工具才需要**。技能只是文字；真正会改文件、跑命令的是工具调用。
 
 ## 十、权限模型
 
