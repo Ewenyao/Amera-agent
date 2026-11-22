@@ -9,12 +9,12 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import resolve, save_skills
+from .config import resolve, save_setting, save_skills
 from .llm import OllamaClient, OllamaError
 from .loop import Agent
 from .project_scan import AGENTS_FILE, INIT_PROMPT, load_context, save_context, scan_project
 from .skills import (ensure_example, global_skills_dir, load_skills,
-                    project_skills_dir, render_enabled)
+                    project_skills_dir, render_enabled, select_skills)
 from .tools import TOOL_SCHEMAS, ToolBox
 
 BOLD, DIM, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[33m", "\033[0m"
@@ -156,7 +156,7 @@ HELP = """命令:
   /init          扫描当前目录生成 AGENTS.md
   /clear         清空对话上下文
   /model [名字]  查看或切换模型
-  /skills        技能列表与开关（on/off/init/reload）
+  /skills        技能列表与开关（on/off/auto/confirm/init/reload）
   /tools         列出可用工具
   /exit          退出
 其它输入都当任务发给模型。"""
@@ -189,7 +189,10 @@ def handle_skills(arg, cfg, agent, toolbox, skills, paint):
             print(f"  [{mark}] {s.name:<16} {s.size:>4}字  {s.scope:<7} {s.description[:44]}")
         print(paint(f"  项目: {project_skills_dir(cfg['root'])}", DIM))
         print(paint(f"  全局: {global_skills_dir()}", DIM))
-        print(paint("  /skills on <名字> · /skills off <名字> · /skills init · /skills reload\n", DIM))
+        auto = "on" if cfg.get("skills_auto") else "off"
+        conf = "on" if cfg.get("skills_confirm") else "off"
+        print(paint(f"  自动筛选: {auto}  使用前确认: {conf}", DIM))
+        print(paint("  /skills on|off <名字> · auto on|off · confirm on|off · init · reload\n", DIM))
         return skills
 
     if action == "init":
@@ -206,6 +209,22 @@ def handle_skills(arg, cfg, agent, toolbox, skills, paint):
         skills = load_skills(cfg["root"], cfg["skills"])
         _persist_skills(cfg, agent, toolbox, skills, paint)
         print(paint(f"  已重新扫描，共 {len(skills)} 个。\n", DIM))
+        return skills
+
+    if action in ("auto", "confirm"):
+        if target not in ("on", "off"):
+            print(paint(f"  用法：/skills {action} on|off\n", YELLOW))
+            return skills
+        key = f"skills_{action}"
+        cfg[key] = (target == "on")
+        save_setting(key, cfg[key])
+        state = "开" if cfg[key] else "关"
+        extra = ""
+        if action == "auto" and cfg[key]:
+            extra = "（每轮按任务关键词挑相关技能）"
+        if action == "confirm" and cfg[key]:
+            extra = "（用技能前先问你一句）"
+        print(paint(f"  技能{action}已{state}{extra}。\n", CYAN))
         return skills
 
     if action in ("on", "off"):
@@ -234,6 +253,30 @@ def handle_skills(arg, cfg, agent, toolbox, skills, paint):
 
     print(paint("  用法：/skills [list|on 名字|off 名字|off all|init|reload]\n", YELLOW))
     return skills
+
+
+def prepare_skills(cfg, agent, toolbox, skills, task, paint, interactive=True):
+    """按任务决定这一轮注入哪些技能；开了 confirm 就先问一句。"""
+    enabled = [s for s in skills if s.enabled]
+    picked, note = enabled, ""
+    if cfg.get("skills_auto") and enabled:
+        picked, matched = select_skills(skills, task)
+        if not matched:
+            note = "（没匹配到关键词，按全部启用处理）"
+
+    if cfg.get("skills_confirm") and picked and interactive:
+        names = "、".join(s.name for s in picked)
+        print(paint(f"  本次技能：{names}{note}", CYAN))
+        try:
+            ans = input(paint("  继续？[Y/n] ", BOLD)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no", "不", "否"):
+            picked = []
+            print(paint("  已跳过技能，仅用基础规则执行。", DIM))
+
+    agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
+    return picked
 
 
 def repl(cfg, client, toolbox, agent, paint, skills):
@@ -310,6 +353,7 @@ def repl(cfg, client, toolbox, agent, paint, skills):
             print(paint(f"  不认识 {cmd}，/help 看看。\n", YELLOW))
             continue
 
+        prepare_skills(cfg, agent, toolbox, skills, raw, paint)
         messages.append({"role": "user", "content": raw})
         print()
         t0 = time.time()
@@ -344,6 +388,10 @@ def main(argv=None):
     ap.add_argument("--host", help="Ollama base url (default: http://127.0.0.1:11434)")
     ap.add_argument("--num-ctx", type=int, help="context window (default 4096)")
     ap.add_argument("--max-steps", type=int, help="max tool rounds (default 12)")
+    ap.add_argument("--skills-auto", action="store_true",
+                    help="pick only task-relevant skills each turn")
+    ap.add_argument("--skills-confirm", action="store_true",
+                    help="ask before using skills on a task")
     ap.add_argument("--shell-timeout", type=int,
                     help="seconds before a shell command is killed (default 180)")
     ap.add_argument("--think", action="store_true", help="enable thinking (slower)")

@@ -118,6 +118,57 @@ def render_enabled(skills, limit: int = RENDER_LIMIT):
     return "## 已启用的技能\n" + "\n\n".join(blocks) + "\n", skipped
 
 
+# ---------------------------------------------------------------- 相关性筛选
+
+STOP_TERMS = {
+    "the", "and", "for", "with", "this", "that", "you", "are", "can", "was",
+    "把", "帮", "我", "的", "了", "是", "在", "和", "就", "一个", "这个", "一下",
+}
+
+
+def _terms(text: str) -> set:
+    """英文按词，中文按 2-gram。够用就行，重点是别把无关技能塞进来。"""
+    low = (text or "").lower()
+    words = {w for w in re.findall(r"[a-z0-9_\-]{3,}", low)}
+    grams = set()
+    for run in re.findall(r"[\u4e00-\u9fff]+", low):
+        if len(run) == 1:
+            continue
+        grams.update(run[i:i + 2] for i in range(len(run) - 1))
+    return {t for t in (words | grams) if t not in STOP_TERMS}
+
+
+def score_skill(skill, task_terms: set) -> int:
+    """名字命中权重最高，描述次之，正文最低。"""
+    if not task_terms:
+        return 0
+    name_terms = _terms(skill.name.replace("-", " ").replace("_", " "))
+    desc_terms = _terms(skill.description)
+    body_terms = _terms(skill.body)
+    score = 3 * len(name_terms & task_terms)
+    score += 2 * len(desc_terms & task_terms)
+    score += len(body_terms & task_terms)
+    return score
+
+
+def select_skills(skills, task: str, max_skills: int = 3):
+    """按任务挑技能。返回 (选中的技能, 是否命中)。
+
+    一个都没命中时返回全部启用技能（fail-open），避免因为措辞差异把规则丢掉。
+    """
+    enabled = [s for s in skills if s.enabled]
+    if len(enabled) <= 1:
+        return enabled, True
+
+    terms = _terms(task)
+    ranked = sorted(((score_skill(s, terms), s) for s in enabled),
+                    key=lambda pair: -pair[0])
+    hits = [s for score, s in ranked if score > 0][:max_skills]
+    if not hits:
+        return enabled, False
+    return hits, True
+
+
 def ensure_example(root):
     """给没有技能的项目放一个示例，降低上手成本。返回新建路径或 None。"""
     target_dir = project_skills_dir(root)
