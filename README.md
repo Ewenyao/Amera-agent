@@ -26,8 +26,9 @@
 | 工具 | `shell` | 执行命令，默认 180 秒超时，破坏性操作黑名单 |
 | 工具 | `web_search` | Bing 搜索，返回标题 / 链接 / 摘要 |
 | 工具 | `fetch_url` | 抓网页，HTML 转纯文本，2MB 上限 |
-| 技能 | 技能文件 | `.agent/skills/*.md` 与全局 `skills/*.md`，按需拼进系统提示 |
-| 技能 | 总长保护 | 已加载技能正文合计超过 1200 字会跳过超出的，不挤爆上下文 |
+| 技能 | 技能文件 | `.agent/skills/*.md` 菜单索引 + `.agent/skills-raw/<名>/` 原始文件树 |
+| 技能 | 按需加载 | 提示里只放技能名，模型调 `use_skill` 取全文，单次上限 12000 字 |
+| 技能 | 技能附件 | `skill://<名>/<文件>` 读脚本模板；`shell` 的 `cwd` 可设成 `skill://<名>` |
 | 技能 | 从仓库安装 | `--install-skills <url>` 拉 GitHub 上的 SKILL.md，压缩后落到技能目录 |
 | 技能 | 会话内选择 | `/skills` 交互式加载，重启即清空，不落盘 |
 | 技能 | 自动判断 + 确认 | 未手动加载的技能按任务匹配，用前先问一次，同意后本会话免问 |
@@ -202,7 +203,7 @@ agent
 
 ```
 ────────────────────────────────────────────────────────────────
-  agent  qwen3.5:4b   工具 7 个   上下文 4096   思维链关
+  agent  qwen3.5:4b   工具 9 个   上下文 8192   思维链关
   cwd    D:\code\my-project
   服务   http://127.0.0.1:11434
   上下文 没有 AGENTS.md，可以先跑 /init
@@ -301,7 +302,7 @@ agent
 {
   "model": "qwen3.5:4b",
   "host": "http://127.0.0.1:11434",
-  "num_ctx": 4096,
+  "num_ctx": 8192,
   "max_steps": 12,
   "think": false,
   "allow_shell": true,
@@ -314,7 +315,7 @@ agent
 |---|---|---|---|
 | `model` | string | `qwen3.5:4b` | 模型名，必须和 `ollama list` 一致 |
 | `host` | string | `http://127.0.0.1:11434` | 远程 Ollama 也能填 |
-| `num_ctx` | int | `4096` | 上下文窗口，越大越吃内存、CPU 推理越慢 |
+| `num_ctx` | int | `8192` | 上下文窗口，越大越吃内存、CPU 推理越慢 |
 | `max_steps` | int | `12` | 单次任务最多几轮工具调用 |
 | `think` | bool | `false` | 是否开思维链 |
 | `allow_shell` | bool | `true` | 关掉就只剩文件工具 |
@@ -367,10 +368,10 @@ front matter 可省略，省略时文件名就是技能名。
 
 ### 会话内选择：`/skills`
 
-技能不跨会话记忆。**每次启动都是"零加载"状态**，横幅会显示：
+技能不跨会话记忆。**每次启动都是"零启用"状态**，横幅会显示：
 
 ```
-  技能   3 个可用，未加载（/skills 选）
+  技能   15 个已安装，未启用（/skills 选）
 ```
 
 敲 `/skills` 进交互选择，输入编号切换，回车返回：
@@ -380,17 +381,36 @@ front matter 可省略，省略时文件名就是技能名。
 
   [✓] 1. commit             72字  project 生成 Conventional Commits 格式的提交信息
   [ ] 2. translate          15字  project 把文本翻译成英文
-  已加载 1/3；手动加载的执行时不再确认
+  已启用 1/2；启用的执行时不再确认
   输入编号切换（空格分隔），回车返回: 2
 
-  已加载：commit、translate
+  已启用：commit、translate
+  执行时我会按需读取完整内容，不再预塞进提示。
 ```
 
-**手动加载的技能，执行时不再询问**——你已经表过态了。
+**启用的技能，执行时不再询问**——你已经表过态了。
+
+### 按需加载：`use_skill`
+
+提示里只放技能的名字，不放正文。模型判断需要时自己调：
+
+```
+▸ use_skill {'name': 'systematic-debugging'}
+```
+
+返回完整 `SKILL.md`（单次上限 12000 字）加附件清单：
+
+```
+[技能 systematic-debugging 全文，9506 字]
+可用附件（用 read_file 读，路径写成 skill://systematic-debugging/<附件名>）：
+  scripts/task-start
+```
+
+这样 19KB 的大技能也能读到原文，而不是压缩摘要。
 
 ### 自动判断 + 使用前确认
 
-没手动加载的技能，agent 每一轮会按任务关键词自己判断要不要用（技能名 ×3、描述 ×2、正文 ×1，中文按 2-gram 切）。判断为相关时先问你：
+没启用的技能，每轮按任务关键词判断相关性（技能名 ×3、描述 ×2、正文 ×1，中文按 2-gram 切）。命中时先问你：
 
 ```
 > 把这句话翻译成英文：你好世界
@@ -398,11 +418,26 @@ front matter 可省略，省略时文件名就是技能名。
   允许？[Y/n]
 ```
 
-- 回 `y` → 本轮用上，并且**本会话后续不再问**
-- 回 `n` → 这轮跳过，只用基础规则执行
+- 回 `y` → 本轮加入可用集，**本会话后续不再问**
+- 回 `n` → 这轮跳过，且本会话不再为它弹提示
 - 直接回车 → 等同 `y`
 
-判断不到相关技能就不会问，也不会塞技能。
+没启用的技能，模型就算想调 `use_skill` 也会被拒：
+
+```
+未获准使用技能 brainstorming。让用户用 /skills 选择，或先回答确认提示。
+```
+
+### 技能附件与脚本
+
+技能目录里的脚本、模板可以直接用：
+
+```
+read_file  path=skill://brainstorming/scripts/frame-template.html
+shell      command=./start-server.sh   cwd=skill://brainstorming
+```
+
+`skill://` 是只读的，`../` 越界会被拒绝。Windows 上命令含 `.sh` 或以 `bash` 开头会自动切到 Git Bash，脚本能在自己的目录里跑。
 
 ### 从 GitHub 安装技能包
 
@@ -416,7 +451,7 @@ agent --install-skills https://github.com/obra/superpowers
 
 ```
   从 obra/superpowers 读取 15 个技能
-  写入 15 个 -> D://proj//.agent//skills
+  写入 15 个 -> D:\proj\.agent\skills
     + brainstorming                 308字
     + systematic-debugging          199字
     + test-driven-development       179字
@@ -434,7 +469,9 @@ agent --install-skills https://github.com/obra/superpowers
 | `--skill-chars 600` | 每个技能压缩到多少字（默认 400） |
 | `--force` | 覆盖同名技能（默认跳过） |
 
-**压缩是有损的，而且必须损。** 原文件 15KB，我们的注入预算是 1200 字。抽取策略是：抓 "Iron Law" 类小节里的代码块 + 每个小节的第一段，跳过 "When to Use" 触发器列表。留下的是骨架：
+**完整原文会一起落盘**，压缩版只用于 `/skills` 菜单显示。模型真要执行时调 `use_skill` 读原始 `SKILL.md`。
+
+压缩版怎么来的：抓 "Iron Law" 类小节里的代码块 + 每个小节的第一段，跳过 "When to Use" 触发器列表。菜单里看到的是骨架：
 
 ```
 NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
@@ -442,7 +479,7 @@ Core principle: ALWAYS find root cause before attempting fixes. Symptom fixes ar
 You MUST complete each phase before proceeding to the next.
 ```
 
-代价：具体话术、模板、分支判断全丢。要完整规则去看原仓库。
+菜单里的压缩版有损，但**执行时读的是原文**，所以不影响实际能力。只有旧版安装（没有 `skills-raw/`）才会退回压缩版。
 
 安装器只认 `SKILL.md`，不看仓库的插件配置、hooks 或 JS 脚本。这些在 ollama-agent 里没有对应机制，装了也没用。
 
@@ -450,7 +487,9 @@ You MUST complete each phase before proceeding to the next.
 
 - **不会自动加载你手动选过的以外的技能**：没问过就不注入。
 - **一次性模式不加载未确认的技能**：`agent "任务"` 没法弹确认，只有手动加载的才生效。
-- **总长 1200 字上限**：超出会跳过并提示，先选的优先保留。
+- **正文不进提示**：提示里只有技能名，模型需要时自己调 `use_skill` 取全文（单次最多 12000 字）。所以不存在"选太多装不下"的问题，但一次读多个大技能会挤爆 `num_ctx`。
+- **技能脚本要用 Git Bash**：Windows 上命令含 `.sh` 或以 `bash` 开头会自动走 Git Bash（默认探测 `D:\git\Git\bin\bash.exe`，可用 `AGENT_BASH` 覆盖）。
+- **没有 subagent**：9 个 superpowers 技能依赖派生子代理，跑这类技能时模型会明确告诉你做不到，不会假装执行。
 - **技能是提示词，不是硬约束**。4B 关思维链时经常无视，实测同一技能开 `--think` 才照做。
 - **不要放密钥**：内容原样进系统提示。
 - **技能不需要审批，工具才需要**。技能只是文字；真正会改文件、跑命令的是工具调用。

@@ -47,6 +47,50 @@ def project_skills_dir(root) -> Path:
     return Path(root) / ".agent" / "skills"
 
 
+def skills_raw_dir(root) -> Path:
+    """安装时保留的原始文件树，按需读全文和附件用。"""
+    return Path(root) / ".agent" / "skills-raw"
+
+
+def global_skills_raw_dir() -> Path:
+    return global_skills_dir().parent / "skills-raw"
+
+
+def skill_root(root, name: str):
+    d = skills_raw_dir(root) / name
+    return d if d.is_dir() else None
+
+
+def skill_files(root, name: str, limit: int = 40) -> list:
+    d = skill_root(root, name)
+    if not d:
+        return []
+    out = []
+    for path in sorted(d.rglob("*")):
+        if path.is_file():
+            out.append(path.relative_to(d).as_posix())
+        if len(out) >= limit:
+            break
+    return out
+
+
+def full_text(root, name: str, limit: int = 12000):
+    """返回 (正文, 是否原始全文)。没有原始文件树就退回压缩版。"""
+    d = skill_root(root, name)
+    if d:
+        candidate = d / "SKILL.md"
+        if not candidate.exists():
+            found = list(d.rglob("SKILL.md"))
+            candidate = found[0] if found else None
+        if candidate and candidate.exists():
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+            return text[:limit], True
+    for skill in load_skills(root):
+        if skill.name == name:
+            return skill.body, False
+    return "", False
+
+
 def _parse(text: str, fallback_name: str):
     name, desc, body = fallback_name, "", text
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.S)

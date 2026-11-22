@@ -201,12 +201,32 @@ def extract(zip_bytes: bytes):
             if not name:
                 parts = info.filename.split("/")
                 name = parts[-2] if len(parts) > 1 else Path(info.filename).stem
-            items.append({"name": name.strip(), "desc": desc.strip(), "body": body})
+            parts = info.filename.split("/")
+            prefix = "/".join(parts[:-1]) + "/"
+            items.append({"name": name.strip(), "desc": desc.strip(), "body": body,
+                          "prefix": prefix, "dirname": parts[-2] if len(parts) > 1 else name})
     return items
 
 
+def _copy_raw(zip_bytes: bytes, prefix: str, target: Path):
+    """把技能目录下的所有文件搬过来，脚本和模板要用。"""
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for info in zf.infolist():
+            if info.is_dir() or not info.filename.startswith(prefix):
+                continue
+            rel = info.filename[len(prefix):]
+            if not rel or ".." in rel.split("/"):
+                continue
+            dst = target / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(zf.read(info))
+            except OSError:
+                continue
+
+
 def install(url: str, dest: Path, limit: int = BODY_LIMIT, force: bool = False,
-            dry_run: bool = False):
+            dry_run: bool = False, raw_dest: Path = None):
     owner, repo = parse_repo(url)
     raw = download_zip(owner, repo)
     items = extract(raw)
@@ -214,6 +234,7 @@ def install(url: str, dest: Path, limit: int = BODY_LIMIT, force: bool = False,
         raise InstallError(f"{owner}/{repo} 里没找到 SKILL.md")
 
     dest = Path(dest)
+    raw_dest = Path(raw_dest) if raw_dest else dest.parent / "skills-raw"
     added, skipped = [], []
     seen = set()
 
@@ -233,7 +254,9 @@ def install(url: str, dest: Path, limit: int = BODY_LIMIT, force: bool = False,
         if target.exists() and not force:
             skipped.append((name, "已存在"))
             continue
+        raw_dir = raw_dest / name
         if not dry_run:
+            _copy_raw(raw, item["prefix"], raw_dir)
             target.write_text(
                 "---\n"
                 f"name: {name}\n"

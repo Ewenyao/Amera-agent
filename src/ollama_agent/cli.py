@@ -15,7 +15,8 @@ from .llm import OllamaClient, OllamaError
 from .loop import Agent
 from .project_scan import AGENTS_FILE, INIT_PROMPT, load_context, save_context, scan_project
 from .skills import (ensure_example, global_skills_dir, load_skills, match_skills,
-                    project_skills_dir, render_skills)
+                    global_skills_raw_dir, project_skills_dir, render_skills,
+                    skills_raw_dir)
 from .tools import TOOL_SCHEMAS, ToolBox
 
 BOLD, DIM, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[33m", "\033[0m"
@@ -41,7 +42,7 @@ class Painter:
         return f"{style}{text}{RESET}" if self.on and style else text
 
 
-def build_system_prompt(cfg, toolbox, skills=None):
+def build_system_prompt(cfg, toolbox, allowed=None):
     root = cfg["root"]
     writable = ", ".join([root, *cfg["write_roots"]])
     read_line = ("- 读：没有目录限制，整个磁盘都能读。" if cfg["read_all"]
@@ -61,14 +62,22 @@ def build_system_prompt(cfg, toolbox, skills=None):
         "4. 工具报错就把真实报错告诉用户，不要编造理由。\n"
         "5. 任务完成后用中文简短说结论，不要再调工具。\n"
         "6. 同一个工具不要连续调用超过两次；查不到就直说。\n"
+        "\n## 能力边界\n"
+        "- 你没有 subagent 能力。技能里要求“派生子代理/并行代理”的步骤，直接告诉用户做不到，"
+        "不要假装已经执行。\n"
+        "- shell 默认走 cmd；命令里带 .sh 或以 bash 开头时自动改用 Git Bash。跑技能脚本时把 "
+        "cwd 设成 skill://<技能名>，脚本路径用相对路径。\n"
+        "- 技能里的附件用 read_file 读，路径写成 skill://<技能名>/<附件名>。\n"
     )
     ctx = load_context(root)
     if ctx:
         prompt += f"\n## 项目上下文（{AGENTS_FILE}）\n{ctx}\n"
 
-    block, _skipped = render_skills(skills or [])
-    if block:
-        prompt += "\n" + block
+    names = [getattr(x, "name", x) for x in (allowed or [])]
+    if names:
+        prompt += ("\n## 可用技能\n" + "、".join(names) + "\n")
+        prompt += ("需要某个技能的完整步骤时，调用 use_skill(name) 取全文；"
+                   "不要凭技能名猜内容。用不到就别调。\n")
     return prompt
 
 
@@ -93,7 +102,9 @@ def make_stack(cfg, paint):
                           think=cfg["think"])
     toolbox = ToolBox(cfg["root"], allow_shell=cfg["allow_shell"],
                       write_roots=cfg["write_roots"], read_all=cfg["read_all"],
-                      shell_timeout=cfg["shell_timeout"])
+                      shell_timeout=cfg["shell_timeout"],
+                      skill_roots=[skills_raw_dir(cfg["root"]), global_skills_raw_dir()],
+                      bash_path=cfg.get("bash_path"))
     skills = load_skills(cfg["root"])
     agent = Agent(client, toolbox, build_system_prompt(cfg, toolbox, skills),
                   max_steps=cfg["max_steps"])
@@ -221,54 +232,45 @@ def handle_skills(cfg, agent, toolbox, skills, manual, paint):
                     manual[name] = True
 
     picked = [s for name in manual for s in skills if s.name == name]
-    agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
-    _block, skipped = render_skills(picked)
+    toolbox.allowed_skills = {s.name for s in picked}
+    agent.system_prompt = build_system_prompt(cfg, toolbox, [s.name for s in picked])
     names = "、".join(s.name for s in picked) or "无"
-    print(paint(f"  已加载：{names}", CYAN))
-    if skipped:
-        print(paint(f"  超过字数上限，未注入：{'、'.join(skipped)}", YELLOW))
+    print(paint(f"  已启用：{names}", CYAN))
+    print(paint("  执行时我会按需读取完整内容，不再预塞进提示。", DIM))
     print()
     return skills, manual
 
 
-def prepare_skills(cfg, agent, toolbox, skills, task, manual, confirmed, paint,
-                   interactive=True):
-    """每轮决定注入哪些技能：手动加载的直接用，自动匹配的要先问一次。"""
-    picked = [s for name in manual for s in skills if s.name == name]
-    names = {s.name for s in picked}
+def prepare_skills(cfg, agent, toolbox, skills, task, manual, confirmed, declined, paint):
+    """决定本轮哪些技能获准使用：手动启用的直接算，自动匹配的先问一次。"""
+    approved = [n for n in manual if any(s.name == n for s in skills)]
 
-    auto = [s for s in match_skills(skills, task) if s.name not in names]
-    if auto:
-        ask = [s for s in auto if s.name not in confirmed]
-        if ask and interactive:
-            label = "、".join(s.name for s in ask)
-            print(paint(f"  这轮想用技能：{label}", CYAN))
-            try:
-                ans = input(paint("  允许？[Y/n] ", BOLD)).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                ans = "n"
-            if ans in ("n", "no", "不", "否"):
-                auto = [s for s in auto if s.name in confirmed]
-                print(paint("  已跳过，用基础规则执行。", DIM))
-            else:
-                confirmed.update(s.name for s in ask)
-        elif ask and not interactive:
-            # 一次性模式没法问，就不擅自加载
-            auto = [s for s in auto if s.name in confirmed]
+    matched = [s for s in match_skills(skills, task)
+               if s.name not in approved and s.name not in declined]
+    if matched:
+        label = "、".join(s.name for s in matched)
+        print(paint(f"  这轮想用技能：{label}", CYAN))
+        try:
+            ans = input(paint("  允许？[Y/n] ", BOLD)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no", "不", "否"):
+            declined.update(s.name for s in matched)
+            print(paint("  已跳过，用基础规则执行。", DIM))
+        else:
+            for skill in matched:
+                approved.append(skill.name)
+                confirmed.add(skill.name)
 
-        for s in auto:
-            if s.name not in names:
-                picked.append(s)
-                names.add(s.name)
-
-    block, skipped = render_skills(picked)
-    agent.system_prompt = build_system_prompt(cfg, toolbox, picked)
-    _log_skipped(skipped, paint)
-    return picked
+    approved = [n for n in dict.fromkeys(approved + [c for c in confirmed if c not in approved])
+                if any(s.name == n for s in skills)]
+    toolbox.allowed_skills = set(approved)
+    agent.system_prompt = build_system_prompt(cfg, toolbox, approved)
+    return approved
 
 
 def repl(cfg, client, toolbox, agent, paint, skills):
-    manual, confirmed = {}, set()   # manual 用 dict 记顺序：先选的先占预算
+    manual, confirmed, declined = {}, set(), set()
     printer = Printer(paint)
     messages = []
     thin = paint("─" * 64, DIM)
@@ -281,7 +283,7 @@ def repl(cfg, client, toolbox, agent, paint, skills):
     print(f"  服务   {cfg['host']}")
     print(f"  上下文 {ctx}")
     if skills:
-        print(f"  技能   {len(skills)} 个可用，未加载（/skills 选）")
+        print(f"  技能   {len(skills)} 个已安装，未启用（/skills 选）")
     print(thin)
     print(paint("  直接说要做的事。/help 看命令，/exit 退出。\n", DIM))
 
@@ -356,7 +358,8 @@ def repl(cfg, client, toolbox, agent, paint, skills):
             print(paint(f"  不认识 {cmd}，/help 看看。\n", YELLOW))
             continue
 
-        prepare_skills(cfg, agent, toolbox, skills, raw, manual, confirmed, paint)
+        prepare_skills(cfg, agent, toolbox, skills, raw, manual, confirmed,
+                       declined, paint)
         messages.append({"role": "user", "content": raw})
         print()
         t0 = time.time()

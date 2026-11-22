@@ -4,9 +4,29 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 APP_NAME = "ollama-agent"
+
+
+def find_bash():
+    """技能里的 .sh 需要真 bash。Windows 上找 Git Bash。"""
+    if os.name != "nt":
+        return None
+    env = os.environ.get("AGENT_BASH")
+    if env and Path(env).exists():
+        return env
+    candidates = [
+        r"D:/git/Git/bin/bash.exe",
+        r"C:/Program Files/Git/bin/bash.exe",
+        r"C:/Program Files (x86)/Git/bin/bash.exe",
+        str(Path.home() / "AppData" / "Local" / "Programs" / "Git" / "bin" / "bash.exe"),
+    ]
+    for cand in candidates:
+        if Path(cand).exists():
+            return cand
+    return shutil.which("bash")
 
 
 def config_path() -> Path:
@@ -58,7 +78,7 @@ def resolve(args) -> dict:
              or "qwen3.5:4b")
     host = (args.host or env.get("OLLAMA_HOST") or cfg.get("host")
             or "http://127.0.0.1:11434")
-    num_ctx = int(args.num_ctx or env.get("OLLAMA_NUM_CTX") or cfg.get("num_ctx") or 4096)
+    num_ctx = int(args.num_ctx or env.get("OLLAMA_NUM_CTX") or cfg.get("num_ctx") or 8192)
     max_steps = int(args.max_steps or cfg.get("max_steps") or 12)
     shell_timeout = int(args.shell_timeout or env.get("AGENT_SHELL_TIMEOUT")
                         or cfg.get("shell_timeout") or 180)
@@ -79,12 +99,15 @@ def resolve(args) -> dict:
     if cfg.get("allow_shell") is False:
         allow_shell = False
 
+    bash = cfg.get("bash_path") or find_bash()
+
     return {
         "model": model,
         "host": host,
         "num_ctx": num_ctx,
         "max_steps": max_steps,
         "shell_timeout": shell_timeout,
+        "bash_path": bash,
         "think": think,
         "read_all": read_all,
         "write_roots": write_roots,

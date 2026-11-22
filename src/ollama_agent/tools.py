@@ -19,6 +19,7 @@ from pathlib import Path
 MAX_FETCH_BYTES = 2_000_000
 FETCH_TIMEOUT = 25
 SHELL_TIMEOUT = 180
+POSIX_HINT = re.compile(r"\.sh\b|^\s*(bash|sh|\./|\.\./)\s*|^\s*\./|^\s*\.\./")
 
 # 只挡破坏性操作。判权限的事交给操作系统，别在这里层层设卡。
 SHELL_BLACKLIST = [
@@ -81,9 +82,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "use_skill",
+            "description": "读取某个技能的完整内容（含附件清单）。技能里的步骤要照做，不要凭印象。",
+            "parameters": _schema({
+                "name": {"type": "string", "description": "技能名，例如 systematic-debugging"},
+            }, ["name"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": "列出已安装的技能名。不确定有哪些技能时先看一眼。",
+            "parameters": _schema({}, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "shell",
             "description": "执行一条 shell 命令并返回输出。可跑 python/pip/git/node 等普通命令。",
-            "parameters": _schema({"command": {"type": "string", "description": "要执行的命令"}}, ["command"]),
+            "parameters": _schema({
+                "command": {"type": "string", "description": "要执行的命令"},
+                "cwd": {"type": "string",
+                        "description": "工作目录，可选。跑技能脚本时写 skill://<技能名>"},
+            }, ["command"]),
         },
     },
     {
@@ -190,16 +213,19 @@ def _kill_tree(proc):
             pass
 
 
-def _run_with_tree_kill(cmd, cwd, timeout, env):
+def _run_with_tree_kill(cmd, cwd, timeout, env, argv=None):
     """跑命令，超时就把整棵进程树干掉，返回 (returncode, stdout, stderr, timed_out)。"""
-    kwargs = dict(shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
+    kwargs = dict(cwd=cwd, stdin=subprocess.DEVNULL,
                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         kwargs["start_new_session"] = True
 
-    proc = subprocess.Popen(cmd, **kwargs)
+    if argv:
+        proc = subprocess.Popen(argv, **kwargs)
+    else:
+        proc = subprocess.Popen(cmd, shell=True, **kwargs)
     try:
         out, err = proc.communicate(timeout=timeout)
         return proc.returncode, out, err, False
@@ -221,20 +247,96 @@ class ToolBox:
 
     def __init__(self, root: Path, allow_shell: bool = True,
                  write_roots=None, read_all: bool = True,
-                 shell_timeout: int = SHELL_TIMEOUT, fetch_timeout: int = FETCH_TIMEOUT):
+                 shell_timeout: int = SHELL_TIMEOUT, fetch_timeout: int = FETCH_TIMEOUT,
+                 skill_roots=None, bash_path=None):
         self.root = Path(root).expanduser().resolve()
         self.allow_shell = allow_shell
         self.read_all = read_all
         self.write_roots = [Path(p).expanduser().resolve() for p in (write_roots or [])]
         self.shell_timeout = shell_timeout
         self.fetch_timeout = fetch_timeout
+        self.skill_roots = [Path(p).resolve() for p in (skill_roots or [])]
+        self.bash_path = bash_path
+        self.allowed_skills = None   # None = 不限制；set = 只允许这些技能被 use_skill
 
     # ---------------------------------------------------------------- path
+
+    def _skill_base(self, name: str) -> Path:
+        for root in self.skill_roots:
+            base = (root / name).resolve()
+            if base.is_dir():
+                return base
+        raise ToolError(f"技能 {name} 没有原始文件（旧版安装），重新安装即可获得全文")
+
+    def _skill_path(self, uri: str) -> Path:
+        body = uri[len("skill://"):]
+        name, _, rest = body.partition("/")
+        if not name:
+            raise ToolError("skill:// 后面要跟技能名")
+        base = self._skill_base(name)
+        full = (base / rest).resolve() if rest else base
+        try:
+            full.relative_to(base)
+        except ValueError:
+            raise ToolError(f"越出技能目录: {uri}")
+        return full
+
+    def skill_names(self) -> list:
+        names = set()
+        for root in self.skill_roots:
+            if root.is_dir():
+                names.update(p.name for p in root.iterdir() if p.is_dir())
+        return sorted(names)
+
+    def use_skill(self, name):
+        """返回技能全文与附件清单。这是按需加载的核心。"""
+        name = str(name or "").strip()
+        if not name:
+            return "name 不能为空"
+        if self.allowed_skills is not None and name not in self.allowed_skills:
+            return (f"未获准使用技能 {name}。让用户用 /skills 选择，"
+                    f"或先回答确认提示。")
+        base = None
+        try:
+            base = self._skill_base(name)
+        except ToolError as exc:
+            return str(exc)
+
+        candidate = base / "SKILL.md"
+        if not candidate.exists():
+            found = list(base.rglob("SKILL.md"))
+            candidate = found[0] if found else None
+        if not candidate or not candidate.exists():
+            return f"技能 {name} 里没有 SKILL.md"
+
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+        files = []
+        for path in sorted(base.rglob("*")):
+            if path.is_file() and path.name != "SKILL.md":
+                files.append(path.relative_to(base).as_posix())
+        head = f"[技能 {name} 全文，{len(text)} 字]"
+        if files:
+            head += ("\n可用附件（用 read_file 读，路径写成 skill://%s/<附件名>）：\n  " % name
+                     + "\n  ".join(files[:12]))
+            if len(files) > 12:
+                head += f"\n  ...另外 {len(files) - 12} 个"
+        return head + "\n\n" + text[:12000]
+
+    def list_skills(self):
+        names = self.skill_names()
+        if not names:
+            return "没有安装带原始文件的技能。用 agent --install-skills <url> 装一个。"
+        return "已安装技能：\n" + "\n".join(f"- {n}" for n in names)
 
     def _resolve(self, rel, write: bool = False) -> Path:
         if rel is None or not str(rel).strip():
             raise ToolError("path 不能为空")
-        p = Path(str(rel)).expanduser()
+        raw = str(rel).strip()
+        if raw.startswith("skill://"):
+            if write:
+                raise ToolError("技能目录是只读的，不能写入")
+            return self._skill_path(raw)
+        p = Path(raw).expanduser()
         full = (self.root / p).resolve() if not p.is_absolute() else p.resolve()
 
         if write:
@@ -326,7 +428,7 @@ class ToolBox:
         f.write_text(text.replace(old_s, new_s, 1), encoding="utf-8")
         return f"已替换 {self._show(f)} 里的 1 处内容"
 
-    def shell(self, command):
+    def shell(self, command, cwd=None):
         if not self.allow_shell:
             return "shell 工具已禁用（--no-shell）。只能使用文件工具。"
         cmd = str(command or "").strip()
@@ -344,10 +446,22 @@ class ToolBox:
         env.setdefault("PIP_NO_INPUT", "1")
         env.setdefault("GIT_OPTIONAL_LOCKS", "0")
 
+        workdir = str(self.root)
+        if cwd:
+            raw_cwd = str(cwd).strip()
+            try:
+                workdir = str(self._skill_path(raw_cwd)) if raw_cwd.startswith("skill://") \
+                    else str(self._resolve(raw_cwd))
+            except ToolError as exc:
+                return f"cwd 无效: {exc}"
+
+        use_bash = bool(self.bash_path and POSIX_HINT.search(cmd))
+        argv = [self.bash_path, "-c", cmd] if use_bash else None
+
         t0 = time.time()
         try:
             returncode, out_raw, err_raw, timed_out = _run_with_tree_kill(
-                cmd, str(self.root), self.shell_timeout, env)
+                cmd, workdir, self.shell_timeout, env, argv)
         except OSError as exc:
             return f"执行失败: {exc}"
 
@@ -355,6 +469,9 @@ class ToolBox:
         err = _strip_progress(_decode_output(err_raw or b""))
         text = out + (("\n[stderr]\n" + err) if err.strip() else "")
         text = text.strip() or "(无输出)"
+
+        if use_bash:
+            text = f"[bash]\n{text}"
 
         if timed_out:
             spent = time.time() - t0
@@ -490,6 +607,8 @@ class ToolBox:
 
     def dispatch(self, name, args):
         table = {
+            "use_skill": self.use_skill,
+            "list_skills": self.list_skills,
             "list_dir": self.list_dir,
             "read_file": self.read_file,
             "write_file": self.write_file,
